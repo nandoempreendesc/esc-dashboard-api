@@ -5,6 +5,9 @@ define('RD_MKT_TOKEN', '745467e98d2287fcdd41eb572722b0c9');
 define('PIPELINE_ID',  '6a3c2697d2d223001fa3f0ad');
 
 header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store, no-cache, must-revalidate');
+header('Pragma: no-cache');
+header('Expires: 0');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');

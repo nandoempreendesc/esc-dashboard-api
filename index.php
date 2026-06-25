@@ -9,20 +9,21 @@ header('Access-Control-Allow-Methods: GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(200); exit; }
 
+// API v1 do CRM (usa token como query param)
 function crm($path) {
     $sep = strpos($path, '?') !== false ? '&' : '?';
-    $url = 'https://api.rd.services/api/v2' . $path . $sep . 'token=' . RD_CRM_TOKEN;
+    $url = 'https://crm.rdstation.com/api/v1' . $path . $sep . 'token=' . RD_CRM_TOKEN;
     $ch  = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_HTTPHEADER     => ['Accept: application/json'],
         CURLOPT_TIMEOUT        => 20,
-        CURLOPT_SSL_VERIFYPEER => true,
     ]);
     $r = curl_exec($ch); curl_close($ch);
     return $r ? json_decode($r, true) : null;
 }
 
+// Marketing API
 function mkt($path) {
     $sep = strpos($path, '?') !== false ? '&' : '?';
     $url = 'https://api.rd.services' . $path . $sep . 'token=' . RD_MKT_TOKEN;
@@ -32,20 +33,16 @@ function mkt($path) {
     return $r ? json_decode($r, true) : null;
 }
 
+// Paginação de deals da API v1
 function all_deals($pipeline_id) {
-    $filter = urlencode("pipeline_id:{$pipeline_id}");
     $all = []; $page = 1;
     do {
-        $res  = crm("/deals?filter={$filter}&page[number]={$page}&page[size]=50");
-        $data = $res['data'] ?? [];
+        $res  = crm("/deals?deal_pipeline_id={$pipeline_id}&page={$page}&limit=50&order=updated_at&direction=desc");
+        $data = $res['deals'] ?? [];
         $all  = array_merge($all, $data);
-        $last = 1;
-        if (!empty($res['links']['last'])) {
-            preg_match('/page%5Bnumber%5D=(\d+)/', $res['links']['last'], $m);
-            $last = (int)($m[1] ?? 1);
-        }
+        $total = $res['total'] ?? 0;
         $page++;
-    } while ($page <= $last && $page <= 10);
+    } while (count($all) < $total && $page <= 10);
     return $all;
 }
 
@@ -63,32 +60,33 @@ function map_origin($name) {
 function find_stage($map, $keywords) {
     foreach ($keywords as $kw)
         foreach ($map as $name => $id)
-            if (str_contains($name, strtolower($kw))) return $id;
+            if (str_contains(strtolower($name), strtolower($kw))) return $id;
     return null;
 }
 
 function esc_pct($a, $b) { return $b > 0 ? round(($a / $b) * 100, 1) : 0; }
-function esc_sum($deals)  { return array_sum(array_map(fn($d) => floatval($d['total_price'] ?? 0), $deals)); }
-function in_stage($deals, $sid) { return array_filter($deals, fn($d) => ($d['stage_id'] ?? '') === $sid); }
+function esc_sum($deals)  { return array_sum(array_map(fn($d) => floatval($d['amount_montly_total'] ?? $d['amount'] ?? 0), $deals)); }
+function in_stage($deals, $sid) { return array_filter($deals, fn($d) => ($d['deal_stage_id'] ?? '') === $sid); }
 
-// Etapas
-$stages_raw = crm('/deal_pipeline_stages?deal_pipeline_id=' . PIPELINE_ID . '&page[size]=20');
+// Etapas via API v1
+$stages_raw = crm('/deal_stages?deal_pipeline_id=' . PIPELINE_ID . '&limit=50');
 $stages = []; $stage_id_map = [];
-foreach ($stages_raw['data'] ?? [] as $s) {
-    $stages[$s['id']] = $s['name'];
-    $stage_id_map[strtolower(trim($s['name']))] = $s['id'];
+foreach ($stages_raw['deal_stages'] ?? [] as $s) {
+    $stages[$s['_id']] = $s['name'];
+    $stage_id_map[strtolower(trim($s['name']))] = $s['_id'];
 }
 
-// Usuários e origens
-$users_raw = crm('/users?page[size]=50');
+// Usuários via API v1
+$users_raw = crm('/users?limit=50');
 $users = [];
-foreach ($users_raw['data'] ?? [] as $u) $users[$u['id']] = $u['name'];
+foreach ($users_raw['users'] ?? [] as $u) $users[$u['_id']] = $u['name'];
 
-$sources_raw = crm('/sources?page[size]=50');
+// Sources via API v1
+$sources_raw = crm('/deal_sources?limit=50');
 $source_map = [];
-foreach ($sources_raw['data'] ?? [] as $s) $source_map[$s['id']] = $s['name'];
+foreach ($sources_raw['deal_sources'] ?? [] as $s) $source_map[$s['_id']] = $s['name'];
 
-// Etapas chave
+// IDs das etapas chave
 $sid_agendada  = find_stage($stage_id_map, ['agendada','agendamento','agend']);
 $sid_realizada = find_stage($stage_id_map, ['realizada','realiz']);
 $sid_proposta  = find_stage($stage_id_map, ['proposta','propost']);
@@ -110,13 +108,13 @@ if ($date_from || $date_to) {
         return true;
     }));
 }
-if ($owner_id)  $deals = array_values(array_filter($deals, fn($d) => ($d['owner_id']  ?? '') === $owner_id));
-if ($stage_flt) $deals = array_values(array_filter($deals, fn($d) => ($d['stage_id']  ?? '') === $stage_flt));
+if ($owner_id)  $deals = array_values(array_filter($deals, fn($d) => ($d['user']['_id'] ?? '') === $owner_id));
+if ($stage_flt) $deals = array_values(array_filter($deals, fn($d) => ($d['deal_stage_id'] ?? '') === $stage_flt));
 
-// KPIs
-$won  = array_values(array_filter($deals, fn($d) => ($d['status'] ?? '') === 'won'));
-$lost = array_values(array_filter($deals, fn($d) => ($d['status'] ?? '') === 'lost'));
-$open = array_values(array_filter($deals, fn($d) => ($d['status'] ?? '') === 'ongoing'));
+// KPIs — na API v1 o status é win=true/false
+$won  = array_values(array_filter($deals, fn($d) => ($d['win'] ?? null) === true));
+$lost = array_values(array_filter($deals, fn($d) => ($d['win'] ?? null) === false && isset($d['win'])));
+$open = array_values(array_filter($deals, fn($d) => !isset($d['win']) || $d['win'] === null));
 
 $d_agendada  = array_values(in_stage($deals, $sid_agendada));
 $d_realizada = array_values(in_stage($deals, $sid_realizada));
@@ -129,20 +127,24 @@ $leads_total = count($deals);
 // Por origem
 $by_origin = [];
 foreach ($deals as $d) {
-    $origin = map_origin($source_map[$d['source_id'] ?? ''] ?? '');
+    $src_id = $d['deal_source']['_id'] ?? '';
+    $origin = map_origin($source_map[$src_id] ?? ($d['deal_source']['name'] ?? ''));
     if (!isset($by_origin[$origin])) $by_origin[$origin] = ['leads'=>0,'won'=>0,'revenue'=>0];
     $by_origin[$origin]['leads']++;
-    if (($d['status']??'') === 'won') { $by_origin[$origin]['won']++; $by_origin[$origin]['revenue'] += floatval($d['total_price']??0); }
+    if (($d['win'] ?? null) === true) {
+        $by_origin[$origin]['won']++;
+        $by_origin[$origin]['revenue'] += floatval($d['amount_montly_total'] ?? $d['amount'] ?? 0);
+    }
 }
 
 // Por responsável
 $by_owner = [];
 foreach ($deals as $d) {
-    $name = $users[$d['owner_id']??''] ?? 'Desconhecido';
+    $name = $d['user']['name'] ?? 'Desconhecido';
     if (!isset($by_owner[$name])) $by_owner[$name] = ['total'=>0,'won'=>0,'lost'=>0,'revenue'=>0];
     $by_owner[$name]['total']++;
-    if (($d['status']??'') === 'won')  { $by_owner[$name]['won']++;  $by_owner[$name]['revenue'] += floatval($d['total_price']??0); }
-    if (($d['status']??'') === 'lost') $by_owner[$name]['lost']++;
+    if (($d['win'] ?? null) === true)  { $by_owner[$name]['won']++;  $by_owner[$name]['revenue'] += floatval($d['amount_montly_total'] ?? $d['amount'] ?? 0); }
+    if (($d['win'] ?? null) === false && isset($d['win'])) $by_owner[$name]['lost']++;
 }
 foreach ($by_owner as &$o) $o['conv'] = esc_pct($o['won'], $o['total']);
 unset($o);
@@ -155,7 +157,7 @@ foreach ($stages as $sid => $sname)
 // Perda por etapa
 $perda = [];
 foreach ($lost as $d) {
-    $name = $stages[$d['stage_id']??''] ?? 'Sem etapa';
+    $name = $stages[$d['deal_stage_id'] ?? ''] ?? 'Sem etapa';
     $perda[$name] = ($perda[$name]??0) + 1;
 }
 arsort($perda);

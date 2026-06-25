@@ -191,14 +191,14 @@ async function buildData(p) {
 
   const today  = new Date().toISOString().slice(0,10);
   const mesIni = today.slice(0,8)+'01';
-  // Leads hoje e mês via CRM v1 (filtra por data de criação)
-  const [mktFunnel, dealsHoje, dealsMes] = await Promise.all([
+  // Leads hoje e mês — conta deals criados no pipeline no período
+  const allDealsHoje = f.filter(d => (d.created_at||'').slice(0,10) === today);
+  const allDealsMes  = f.filter(d => (d.created_at||'').slice(0,10) >= mesIni);
+  const leadsHoje = { total: allDealsHoje.length };
+  const leadsMes  = { total: allDealsMes.length  };
+  const [mktFunnel] = await Promise.all([
     mkt('/platform/analytics/conversion_funnel'),
-    v1('/deals', { created_at_from: today + 'T00:00:00-03:00', created_at_to: today + 'T23:59:59-03:00', limit: 1 }),
-    v1('/deals', { created_at_from: mesIni + 'T00:00:00-03:00', created_at_to: today + 'T23:59:59-03:00', limit: 1 }),
   ]);
-  const leadsHoje = { total: dealsHoje?.total || 0 };
-  const leadsMes  = { total: dealsMes?.total  || 0 };
 
   const receita = sum(won), qtdWon = won.length;
 

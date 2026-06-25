@@ -1,6 +1,7 @@
 services:
   - type: web
     name: esc-dashboard-api
-    env: docker
+    env: node
     plan: free
-    dockerfilePath: ./Dockerfile
+    buildCommand: npm install
+    startCommand: node server.js

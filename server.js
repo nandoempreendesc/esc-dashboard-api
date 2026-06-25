@@ -191,11 +191,14 @@ async function buildData(p) {
 
   const today  = new Date().toISOString().slice(0,10);
   const mesIni = today.slice(0,8)+'01';
-  const [mktFunnel, leadsHoje, leadsMes] = await Promise.all([
+  // Leads hoje e mês via CRM v1 (filtra por data de criação)
+  const [mktFunnel, dealsHoje, dealsMes] = await Promise.all([
     mkt('/platform/analytics/conversion_funnel'),
-    mkt(`/platform/contacts/search?page=1&page_size=1&created_at_from=${today}T00:00:00&created_at_to=${today}T23:59:59`),
-    mkt(`/platform/contacts/search?page=1&page_size=1&created_at_from=${mesIni}T00:00:00&created_at_to=${today}T23:59:59`),
+    v1('/deals', { created_at_from: today + 'T00:00:00-03:00', created_at_to: today + 'T23:59:59-03:00', limit: 1 }),
+    v1('/deals', { created_at_from: mesIni + 'T00:00:00-03:00', created_at_to: today + 'T23:59:59-03:00', limit: 1 }),
   ]);
+  const leadsHoje = { total: dealsHoje?.total || 0 };
+  const leadsMes  = { total: dealsMes?.total  || 0 };
 
   const receita = sum(won), qtdWon = won.length;
 
@@ -256,3 +259,4 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => console.log(`ESC Dashboard API na porta ${PORT}`));
+// patch

@@ -20,37 +20,28 @@ const STAGE_ORDER = {};
 const STAGE_NAME  = {};
 STAGES.forEach(s => { STAGE_ORDER[s.id] = s.order; STAGE_NAME[s.id] = s.name; });
 
-const SID_AGEND   = '6a3c2697d2d223001fa3f0b1';
-const SID_REUN    = '6a3c2697d2d223001fa3f0b2';
-const SID_NEGOC   = '6a3c2dfc1afd75001e199a2d';
 const SID_GANHO   = '6a3c2dff80f293001ef244bc';
 const SID_PERDIDO = '6a3c2e038c080c001f52f8e6';
 const POS_AGEND = 3, POS_REUN = 4, POS_NEGOC = 5;
 
 function httpsGet(url) {
   return new Promise((resolve) => {
-    console.log('GET:', url);
     const req = https.get(url, { headers: { 'Accept': 'application/json' } }, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
         try { resolve(JSON.parse(data)); }
-        catch(e) { console.error('Parse error:', e.message); resolve(null); }
+        catch(e) { resolve(null); }
       });
     });
-    req.on('error', e => { console.error('Req error:', e.message); resolve(null); });
+    req.on('error', () => resolve(null));
     req.setTimeout(25000, () => { req.destroy(); resolve(null); });
   });
 }
 
-// Monta URL sem encoding do filtro RDQL
-function crmUrl(path, extraParams = {}) {
-  let url = `https://crm.rdstation.com/api/v1${path}`;
-  const sep = url.includes('?') ? '&' : '?';
-  url += `${sep}token=${CRM_TOKEN}`;
-  Object.entries(extraParams).forEach(([k, v]) => {
-    url += `&${k}=${v}`;
-  });
+function crmUrl(path, params = {}) {
+  let url = `https://crm.rdstation.com/api/v1${path}?token=${CRM_TOKEN}`;
+  Object.entries(params).forEach(([k, v]) => url += `&${k}=${v}`);
   return url;
 }
 
@@ -63,27 +54,20 @@ async function allDeals() {
   const all = [];
   let page = 1;
   while (page <= 10) {
-    // API v1 — usa deal_pipeline_id diretamente, sem RDQL
-    const url = crmUrl('/deals', {
-      deal_pipeline_id: PIPELINE_ID,
-      page: page,
-      limit: 50,
-      order: 'updated_at',
-      direction: 'desc'
-    });
-    const res = await httpsGet(url);
+    const res = await httpsGet(crmUrl('/deals', {
+      deal_pipeline_id: PIPELINE_ID, page, limit: 50,
+      order: 'updated_at', direction: 'desc'
+    }));
     const data = res?.deals || [];
     const total = res?.total || 0;
-    console.log(`Página ${page}: ${data.length} deals (total: ${total})`);
-    if (data.length > 0) {
-      const d = data[0];
-      console.log('Deal exemplo - name:', d.name, 'deal_stage_id:', d.deal_stage_id, 'win:', d.win, 'amount:', d.amount_montly_total);
+    if (page === 1 && data.length > 0) {
+      // Log completo do primeiro deal para descobrir os campos corretos
+      console.log('DEAL COMPLETO:', JSON.stringify(data[0]));
     }
     all.push(...data);
     if (all.length >= total || data.length === 0) break;
     page++;
   }
-  console.log('Total deals:', all.length);
   return all;
 }
 
@@ -112,18 +96,47 @@ function mapOrigin(name) {
   return 'Outros';
 }
 
-// API v1: stage em deal_stage_id, status em win (true/false/null), valor em amount_montly_total
-function dealVal(d)  { return parseFloat(d.amount_montly_total || d.amount || 0); }
+// Extrai stage_id de qualquer campo possível
+function getStageId(d) {
+  return d.deal_stage_id || d.stage_id || d.deal_stage?._id || d.stage?._id
+    || d.deal_stages?.[0]?._id || null;
+}
+
+// Extrai valor de qualquer campo possível  
+function getDealVal(d) {
+  return parseFloat(d.amount_montly_total || d.amount || d.total_price
+    || d.value || d.price || 0);
+}
+
+// Extrai status
+function isWon(d)  { return d.win === true  || d.status === 'won'; }
+function isLost(d) { return d.win === false && (d.win !== null) && d.win !== undefined || d.status === 'lost'; }
+function isOpen(d) { return !isWon(d) && !isLost(d); }
+
 function pct(a, b)   { return b > 0 ? Math.round((a/b)*1000)/10 : 0; }
-function sumArr(arr) { return arr.reduce((s,d) => s + dealVal(d), 0); }
-function stageId(d)  { return d.deal_stage_id || d.stage_id || null; }
-function stageOrd(d) { return STAGE_ORDER[stageId(d)] ?? -1; }
+function sumArr(arr) { return arr.reduce((s,d) => s + getDealVal(d), 0); }
+function stageOrd(d) { return STAGE_ORDER[getStageId(d)] ?? -1; }
 
 async function buildData(params) {
   const [deals, users, sourceMap] = await Promise.all([allDeals(), getUsers(), getSources()]);
 
+  console.log(`Total deals: ${deals.length}`);
   if (deals.length > 0) {
-    console.log('Stage IDs:', deals.map(d => `${d.name}:${stageId(d)}:ord${stageOrd(d)}`).join(' | '));
+    const d = deals[0];
+    console.log('stage_id tentativas:', {
+      deal_stage_id: d.deal_stage_id,
+      stage_id: d.stage_id,
+      deal_stage: d.deal_stage,
+      stage: d.stage,
+      getStageId: getStageId(d),
+    });
+    console.log('valor tentativas:', {
+      amount_montly_total: d.amount_montly_total,
+      amount: d.amount,
+      total_price: d.total_price,
+      value: d.value,
+    });
+    console.log('win/status:', { win: d.win, status: d.status });
   }
 
   let filtered = [...deals];
@@ -135,13 +148,12 @@ async function buildData(params) {
       return true;
     });
   }
-  if (params.owner_id) filtered = filtered.filter(d => (d.user?._id || d.user_id) === params.owner_id);
-  if (params.stage_id) filtered = filtered.filter(d => stageId(d) === params.stage_id);
+  if (params.owner_id) filtered = filtered.filter(d => (d.user?._id || d.user_id || d.owner_id) === params.owner_id);
+  if (params.stage_id) filtered = filtered.filter(d => getStageId(d) === params.stage_id);
 
-  // API v1: win=true ganho, win=false perdido, win=null em aberto
-  const won  = filtered.filter(d => d.win === true);
-  const lost = filtered.filter(d => d.win === false && d.win !== null && 'win' in d);
-  const open = filtered.filter(d => d.win === null || d.win === undefined || !('win' in d));
+  const won  = filtered.filter(isWon);
+  const lost = filtered.filter(isLost);
+  const open = filtered.filter(isOpen);
 
   console.log(`won:${won.length} lost:${lost.length} open:${open.length}`);
 
@@ -154,7 +166,7 @@ async function buildData(params) {
   const funnelVisual = STAGES.map(s => {
     let cnt, val;
     if (s.id === SID_GANHO || s.id === SID_PERDIDO) {
-      const arr = filtered.filter(d => stageId(d) === s.id);
+      const arr = filtered.filter(d => getStageId(d) === s.id);
       cnt = arr.length; val = sumArr(arr);
     } else {
       const arr = open.filter(d => stageOrd(d) >= s.order);
@@ -163,30 +175,29 @@ async function buildData(params) {
     return { stage: s.name, count: cnt, value: Math.round(val*100)/100 };
   });
 
-  console.log('Funil:', funnelVisual.map(f=>`${f.stage}:${f.count}`).join(', '));
-
   const byOrigin = {};
   filtered.forEach(d => {
-    const srcId = d.deal_source?._id || d.source_id || '';
-    const origin = mapOrigin(sourceMap[srcId] || d.deal_source?.name || '');
+    const srcId = d.deal_source?._id || d.deal_source_id || d.source_id || '';
+    const srcName = sourceMap[srcId] || d.deal_source?.name || '';
+    const origin = mapOrigin(srcName);
     if (!byOrigin[origin]) byOrigin[origin] = { leads:0, won:0, revenue:0 };
     byOrigin[origin].leads++;
-    if (d.win === true) { byOrigin[origin].won++; byOrigin[origin].revenue += dealVal(d); }
+    if (isWon(d)) { byOrigin[origin].won++; byOrigin[origin].revenue += getDealVal(d); }
   });
 
   const byOwner = {};
   filtered.forEach(d => {
-    const name = d.user?.name || users[d.user_id] || 'Desconhecido';
+    const name = d.user?.name || users[d.user?._id || d.user_id] || 'Desconhecido';
     if (!byOwner[name]) byOwner[name] = { total:0, won:0, lost:0, revenue:0, conv:0 };
     byOwner[name].total++;
-    if (d.win === true)  { byOwner[name].won++;  byOwner[name].revenue += dealVal(d); }
-    if (d.win === false && 'win' in d) byOwner[name].lost++;
+    if (isWon(d))  { byOwner[name].won++;  byOwner[name].revenue += getDealVal(d); }
+    if (isLost(d)) byOwner[name].lost++;
   });
   Object.values(byOwner).forEach(o => o.conv = pct(o.won, o.total));
 
   const perda = {};
   lost.forEach(d => {
-    const name = STAGE_NAME[stageId(d)] || 'Sem etapa';
+    const name = STAGE_NAME[getStageId(d)] || 'Sem etapa';
     perda[name] = (perda[name] || 0) + 1;
   });
 

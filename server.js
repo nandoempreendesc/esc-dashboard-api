@@ -39,10 +39,10 @@ function get(url) {
   });
 }
 
-// API v2 — URL manual para preservar ":" no filter
-function crm2(path) {
-  const sep = path.includes('?') ? '&' : '?';
-  return get(`https://api.rd.services/api/v2${path}${sep}token=${CRM_TOKEN}`);
+function v1(path, params = {}) {
+  let url = `https://crm.rdstation.com/api/v1${path}?token=${CRM_TOKEN}`;
+  Object.entries(params).forEach(([k, v]) => url += `&${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+  return get(url);
 }
 
 function mkt(path) {
@@ -54,30 +54,29 @@ async function allDeals() {
   const all = [];
   let page = 1;
   while (page <= 10) {
-    // URL montada manualmente — preserva ":" sem encoding
-    const url = `https://api.rd.services/api/v2/deals?filter=pipeline_id:${PIPELINE_ID}&page[number]=${page}&page[size]=50&token=${CRM_TOKEN}`;
-    const res = await get(url);
-    const data = res?.data || [];
-    console.log(`Página ${page}: ${data.length} deals`);
+    const res = await v1('/deals', { deal_pipeline_id: PIPELINE_ID, page, limit: 50, order: 'updated_at', direction: 'desc' });
+    const data = res?.deals || [];
+    const total = res?.total || 0;
+    console.log(`Página ${page}: ${data.length} deals (total: ${total})`);
     all.push(...data);
-    if (data.length < 50) break;
+    if (all.length >= total || data.length === 0) break;
     page++;
   }
-  console.log(`Total: ${all.length}`);
+  console.log(`Total carregado: ${all.length}`);
   return all;
 }
 
 async function getUsers() {
-  const res = await get(`https://api.rd.services/api/v2/users?page[size]=50&token=${CRM_TOKEN}`);
+  const res = await v1('/users', { limit: 50 });
   const u = {};
-  (res?.data || []).forEach(x => u[x.id] = x.name);
+  (res?.users || []).forEach(x => u[x._id] = x.name);
   return u;
 }
 
 async function getSources() {
-  const res = await get(`https://api.rd.services/api/v2/sources?page[size]=50&token=${CRM_TOKEN}`);
+  const res = await v1('/deal_sources', { limit: 50 });
   const m = {};
-  (res?.data || []).forEach(x => m[x.id] = x.name);
+  (res?.deal_sources || []).forEach(x => m[x._id] = x.name);
   return m;
 }
 
@@ -92,14 +91,29 @@ function mapOrigin(name) {
   return 'Outros';
 }
 
-// API v2: total_price, status, stage_id, owner_id, source_id
-const val  = d  => parseFloat(d.total_price || 0);
-const pct  = (a,b) => b > 0 ? Math.round((a/b)*1000)/10 : 0;
-const sum  = arr => arr.reduce((s,d) => s + val(d), 0);
-const sOrd = d  => STAGE_ORDER[d.stage_id] ?? -1;
+// API v1 campos corretos (confirmados nos logs):
+// stage: deal_stage._id
+// valor: amount_total
+// status: win (true=ganho, false=perdido, null=aberto)
+// dono: user._id
+// fonte: deal_source._id
+
+const stageId = d => d.deal_stage?._id || null;
+const val     = d => parseFloat(d.amount_total || d.amount_montly || 0);
+const isWon   = d => d.win === true;
+const isLost  = d => d.win === false;
+const isOpen  = d => d.win === null || d.win === undefined;
+const sOrd    = d => STAGE_ORDER[stageId(d)] ?? -1;
+const pct     = (a,b) => b > 0 ? Math.round((a/b)*1000)/10 : 0;
+const sum     = arr => arr.reduce((s,d) => s + val(d), 0);
 
 async function buildData(p) {
   const [deals, users, sources] = await Promise.all([allDeals(), getUsers(), getSources()]);
+
+  if (deals.length > 0) {
+    const d = deals[0];
+    console.log(`Deal[0]: stage=${stageId(d)} ord=${sOrd(d)} val=${val(d)} win=${d.win}`);
+  }
 
   let f = [...deals];
   if (p.date_from || p.date_to) {
@@ -110,15 +124,15 @@ async function buildData(p) {
       return true;
     });
   }
-  if (p.owner_id) f = f.filter(d => d.owner_id === p.owner_id);
-  if (p.stage_id) f = f.filter(d => d.stage_id === p.stage_id);
+  if (p.owner_id) f = f.filter(d => (d.user?._id) === p.owner_id);
+  if (p.stage_id) f = f.filter(d => stageId(d) === p.stage_id);
 
-  const won  = f.filter(d => d.status === 'won');
-  const lost = f.filter(d => d.status === 'lost');
-  const open = f.filter(d => d.status === 'ongoing');
+  const won  = f.filter(isWon);
+  const lost = f.filter(isLost);
+  const open = f.filter(isOpen);
 
   console.log(`won:${won.length} lost:${lost.length} open:${open.length}`);
-  console.log('Etapas+valores:', open.map(d=>`${d.name}:${STAGE_NAME[d.stage_id]||'?'}:R$${val(d)}`).join(' | '));
+  console.log('Open stages:', open.map(d=>`${d.name}:${STAGE_NAME[stageId(d)]||'?'}:ord${sOrd(d)}:R$${val(d)}`).join(' | '));
 
   const cntAgend = open.filter(d => sOrd(d) >= POS_AGEND).length;
   const cntReun  = open.filter(d => sOrd(d) >= POS_REUN).length;
@@ -129,7 +143,7 @@ async function buildData(p) {
   const funnel = STAGES.map(s => {
     let cnt, v;
     if (s.id === SID_GANHO || s.id === SID_PERDIDO) {
-      const arr = f.filter(d => d.stage_id === s.id);
+      const arr = f.filter(d => stageId(d) === s.id);
       cnt = arr.length; v = sum(arr);
     } else {
       const arr = open.filter(d => sOrd(d) >= s.order);
@@ -138,27 +152,29 @@ async function buildData(p) {
     return { stage: s.name, count: cnt, value: Math.round(v*100)/100 };
   });
 
+  console.log('Funil:', funnel.map(x=>`${x.stage}:${x.count}:R$${x.value}`).join(', '));
+
   const byOrigin = {};
   f.forEach(d => {
-    const origin = mapOrigin(sources[d.source_id] || '');
+    const origin = mapOrigin(sources[d.deal_source?._id] || d.deal_source?.name || '');
     if (!byOrigin[origin]) byOrigin[origin] = { leads:0, won:0, revenue:0 };
     byOrigin[origin].leads++;
-    if (d.status==='won') { byOrigin[origin].won++; byOrigin[origin].revenue += val(d); }
+    if (isWon(d)) { byOrigin[origin].won++; byOrigin[origin].revenue += val(d); }
   });
 
   const byOwner = {};
   f.forEach(d => {
-    const name = users[d.owner_id] || 'Desconhecido';
+    const name = d.user?.name || users[d.user?._id] || 'Desconhecido';
     if (!byOwner[name]) byOwner[name] = { total:0, won:0, lost:0, revenue:0, conv:0 };
     byOwner[name].total++;
-    if (d.status==='won')  { byOwner[name].won++;  byOwner[name].revenue += val(d); }
-    if (d.status==='lost') byOwner[name].lost++;
+    if (isWon(d))  { byOwner[name].won++;  byOwner[name].revenue += val(d); }
+    if (isLost(d)) byOwner[name].lost++;
   });
   Object.values(byOwner).forEach(o => o.conv = pct(o.won, o.total));
 
   const perda = {};
   lost.forEach(d => {
-    const name = STAGE_NAME[d.stage_id] || 'Sem etapa';
+    const name = STAGE_NAME[stageId(d)] || 'Sem etapa';
     perda[name] = (perda[name]||0)+1;
   });
 

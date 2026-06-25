@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: esc-dashboard-api
+    env: php
+    buildCommand: echo "Ready"
+    startCommand: php -S 0.0.0.0:$PORT -t .
+    plan: free

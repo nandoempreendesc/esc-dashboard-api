@@ -1,4 +1,4 @@
-const http = require('http');
+const http  = require('http');
 const https = require('https');
 
 const CRM_TOKEN   = '6a3be3a4c81c68001e67ea0a';
@@ -16,73 +16,69 @@ const STAGES = [
   { id: '6a3c2e038c080c001f52f8e6', name: 'Fechado Perdido',       order: 7 },
 ];
 
-const STAGE_ORDER = {};
-const STAGE_NAME  = {};
-STAGES.forEach(s => { STAGE_ORDER[s.id] = s.order; STAGE_NAME[s.id] = s.name; });
+const STAGE_ORDER = {}, STAGE_NAME = {}, STAGES_SIMPLE = {};
+STAGES.forEach(s => {
+  STAGE_ORDER[s.id] = s.order;
+  STAGE_NAME[s.id]  = s.name;
+  STAGES_SIMPLE[s.id] = s.name;
+});
 
 const SID_GANHO   = '6a3c2dff80f293001ef244bc';
 const SID_PERDIDO = '6a3c2e038c080c001f52f8e6';
 const POS_AGEND = 3, POS_REUN = 4, POS_NEGOC = 5;
 
-function httpsGet(url) {
-  return new Promise((resolve) => {
-    const req = https.get(url, { headers: { 'Accept': 'application/json' } }, (res) => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch(e) { resolve(null); }
-      });
+function get(url) {
+  return new Promise(resolve => {
+    const req = https.get(url, { headers: { Accept: 'application/json' } }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
     });
     req.on('error', () => resolve(null));
     req.setTimeout(25000, () => { req.destroy(); resolve(null); });
   });
 }
 
-function crmUrl(path, params = {}) {
-  let url = `https://crm.rdstation.com/api/v1${path}?token=${CRM_TOKEN}`;
-  Object.entries(params).forEach(([k, v]) => url += `&${k}=${v}`);
-  return url;
+// API v2 — URL manual para preservar ":" no filter
+function crm2(path) {
+  const sep = path.includes('?') ? '&' : '?';
+  return get(`https://api.rd.services/api/v2${path}${sep}token=${CRM_TOKEN}`);
 }
 
-function mktUrl(path) {
+function mkt(path) {
   const sep = path.includes('?') ? '&' : '?';
-  return `https://api.rd.services${path}${sep}token=${MKT_TOKEN}`;
+  return get(`https://api.rd.services${path}${sep}token=${MKT_TOKEN}`);
 }
 
 async function allDeals() {
   const all = [];
   let page = 1;
   while (page <= 10) {
-    const res = await httpsGet(crmUrl('/deals', {
-      deal_pipeline_id: PIPELINE_ID, page, limit: 50,
-      order: 'updated_at', direction: 'desc'
-    }));
-    const data = res?.deals || [];
-    const total = res?.total || 0;
-    if (page === 1 && data.length > 0) {
-      // Log completo do primeiro deal para descobrir os campos corretos
-      console.log('DEAL COMPLETO:', JSON.stringify(data[0]));
-    }
+    // URL montada manualmente — preserva ":" sem encoding
+    const url = `https://api.rd.services/api/v2/deals?filter=pipeline_id:${PIPELINE_ID}&page[number]=${page}&page[size]=50&token=${CRM_TOKEN}`;
+    const res = await get(url);
+    const data = res?.data || [];
+    console.log(`Página ${page}: ${data.length} deals`);
     all.push(...data);
-    if (all.length >= total || data.length === 0) break;
+    if (data.length < 50) break;
     page++;
   }
+  console.log(`Total: ${all.length}`);
   return all;
 }
 
 async function getUsers() {
-  const res = await httpsGet(crmUrl('/users', { limit: 50 }));
-  const users = {};
-  (res?.users || []).forEach(u => users[u._id] = u.name);
-  return users;
+  const res = await get(`https://api.rd.services/api/v2/users?page[size]=50&token=${CRM_TOKEN}`);
+  const u = {};
+  (res?.data || []).forEach(x => u[x.id] = x.name);
+  return u;
 }
 
 async function getSources() {
-  const res = await httpsGet(crmUrl('/deal_sources', { limit: 50 }));
-  const map = {};
-  (res?.deal_sources || []).forEach(s => map[s._id] = s.name);
-  return map;
+  const res = await get(`https://api.rd.services/api/v2/sources?page[size]=50&token=${CRM_TOKEN}`);
+  const m = {};
+  (res?.data || []).forEach(x => m[x.id] = x.name);
+  return m;
 }
 
 function mapOrigin(name) {
@@ -96,109 +92,74 @@ function mapOrigin(name) {
   return 'Outros';
 }
 
-// Extrai stage_id de qualquer campo possível
-function getStageId(d) {
-  return d.deal_stage_id || d.stage_id || d.deal_stage?._id || d.stage?._id
-    || d.deal_stages?.[0]?._id || null;
-}
+// API v2: total_price, status, stage_id, owner_id, source_id
+const val  = d  => parseFloat(d.total_price || 0);
+const pct  = (a,b) => b > 0 ? Math.round((a/b)*1000)/10 : 0;
+const sum  = arr => arr.reduce((s,d) => s + val(d), 0);
+const sOrd = d  => STAGE_ORDER[d.stage_id] ?? -1;
 
-// Extrai valor de qualquer campo possível  
-function getDealVal(d) {
-  return parseFloat(d.amount_montly_total || d.amount || d.total_price
-    || d.value || d.price || 0);
-}
+async function buildData(p) {
+  const [deals, users, sources] = await Promise.all([allDeals(), getUsers(), getSources()]);
 
-// Extrai status
-function isWon(d)  { return d.win === true  || d.status === 'won'; }
-function isLost(d) { return d.win === false && (d.win !== null) && d.win !== undefined || d.status === 'lost'; }
-function isOpen(d) { return !isWon(d) && !isLost(d); }
-
-function pct(a, b)   { return b > 0 ? Math.round((a/b)*1000)/10 : 0; }
-function sumArr(arr) { return arr.reduce((s,d) => s + getDealVal(d), 0); }
-function stageOrd(d) { return STAGE_ORDER[getStageId(d)] ?? -1; }
-
-async function buildData(params) {
-  const [deals, users, sourceMap] = await Promise.all([allDeals(), getUsers(), getSources()]);
-
-  console.log(`Total deals: ${deals.length}`);
-  if (deals.length > 0) {
-    const d = deals[0];
-    console.log('stage_id tentativas:', {
-      deal_stage_id: d.deal_stage_id,
-      stage_id: d.stage_id,
-      deal_stage: d.deal_stage,
-      stage: d.stage,
-      getStageId: getStageId(d),
-    });
-    console.log('valor tentativas:', {
-      amount_montly_total: d.amount_montly_total,
-      amount: d.amount,
-      total_price: d.total_price,
-      value: d.value,
-    });
-    console.log('win/status:', { win: d.win, status: d.status });
-  }
-
-  let filtered = [...deals];
-  if (params.date_from || params.date_to) {
-    filtered = filtered.filter(d => {
-      const dt = (d.created_at || '').slice(0, 10);
-      if (params.date_from && dt < params.date_from) return false;
-      if (params.date_to   && dt > params.date_to)   return false;
+  let f = [...deals];
+  if (p.date_from || p.date_to) {
+    f = f.filter(d => {
+      const dt = (d.created_at||'').slice(0,10);
+      if (p.date_from && dt < p.date_from) return false;
+      if (p.date_to   && dt > p.date_to)   return false;
       return true;
     });
   }
-  if (params.owner_id) filtered = filtered.filter(d => (d.user?._id || d.user_id || d.owner_id) === params.owner_id);
-  if (params.stage_id) filtered = filtered.filter(d => getStageId(d) === params.stage_id);
+  if (p.owner_id) f = f.filter(d => d.owner_id === p.owner_id);
+  if (p.stage_id) f = f.filter(d => d.stage_id === p.stage_id);
 
-  const won  = filtered.filter(isWon);
-  const lost = filtered.filter(isLost);
-  const open = filtered.filter(isOpen);
+  const won  = f.filter(d => d.status === 'won');
+  const lost = f.filter(d => d.status === 'lost');
+  const open = f.filter(d => d.status === 'ongoing');
 
   console.log(`won:${won.length} lost:${lost.length} open:${open.length}`);
+  console.log('Etapas+valores:', open.map(d=>`${d.name}:${STAGE_NAME[d.stage_id]||'?'}:R$${val(d)}`).join(' | '));
 
-  const cntAgend = open.filter(d => stageOrd(d) >= POS_AGEND).length;
-  const cntReun  = open.filter(d => stageOrd(d) >= POS_REUN).length;
-  const cntNegoc = open.filter(d => stageOrd(d) >= POS_NEGOC).length;
-  const valNegoc = sumArr(open.filter(d => stageOrd(d) >= POS_NEGOC));
-  const valPipe  = sumArr(open);
+  const cntAgend = open.filter(d => sOrd(d) >= POS_AGEND).length;
+  const cntReun  = open.filter(d => sOrd(d) >= POS_REUN).length;
+  const cntNegoc = open.filter(d => sOrd(d) >= POS_NEGOC).length;
+  const valNegoc = sum(open.filter(d => sOrd(d) >= POS_NEGOC));
+  const valPipe  = sum(open);
 
-  const funnelVisual = STAGES.map(s => {
-    let cnt, val;
+  const funnel = STAGES.map(s => {
+    let cnt, v;
     if (s.id === SID_GANHO || s.id === SID_PERDIDO) {
-      const arr = filtered.filter(d => getStageId(d) === s.id);
-      cnt = arr.length; val = sumArr(arr);
+      const arr = f.filter(d => d.stage_id === s.id);
+      cnt = arr.length; v = sum(arr);
     } else {
-      const arr = open.filter(d => stageOrd(d) >= s.order);
-      cnt = arr.length; val = sumArr(arr);
+      const arr = open.filter(d => sOrd(d) >= s.order);
+      cnt = arr.length; v = sum(arr);
     }
-    return { stage: s.name, count: cnt, value: Math.round(val*100)/100 };
+    return { stage: s.name, count: cnt, value: Math.round(v*100)/100 };
   });
 
   const byOrigin = {};
-  filtered.forEach(d => {
-    const srcId = d.deal_source?._id || d.deal_source_id || d.source_id || '';
-    const srcName = sourceMap[srcId] || d.deal_source?.name || '';
-    const origin = mapOrigin(srcName);
+  f.forEach(d => {
+    const origin = mapOrigin(sources[d.source_id] || '');
     if (!byOrigin[origin]) byOrigin[origin] = { leads:0, won:0, revenue:0 };
     byOrigin[origin].leads++;
-    if (isWon(d)) { byOrigin[origin].won++; byOrigin[origin].revenue += getDealVal(d); }
+    if (d.status==='won') { byOrigin[origin].won++; byOrigin[origin].revenue += val(d); }
   });
 
   const byOwner = {};
-  filtered.forEach(d => {
-    const name = d.user?.name || users[d.user?._id || d.user_id] || 'Desconhecido';
+  f.forEach(d => {
+    const name = users[d.owner_id] || 'Desconhecido';
     if (!byOwner[name]) byOwner[name] = { total:0, won:0, lost:0, revenue:0, conv:0 };
     byOwner[name].total++;
-    if (isWon(d))  { byOwner[name].won++;  byOwner[name].revenue += getDealVal(d); }
-    if (isLost(d)) byOwner[name].lost++;
+    if (d.status==='won')  { byOwner[name].won++;  byOwner[name].revenue += val(d); }
+    if (d.status==='lost') byOwner[name].lost++;
   });
   Object.values(byOwner).forEach(o => o.conv = pct(o.won, o.total));
 
   const perda = {};
   lost.forEach(d => {
-    const name = STAGE_NAME[getStageId(d)] || 'Sem etapa';
-    perda[name] = (perda[name] || 0) + 1;
+    const name = STAGE_NAME[d.stage_id] || 'Sem etapa';
+    perda[name] = (perda[name]||0)+1;
   });
 
   let cl=null,cv=null,cr=null,mL=-1,mV=-1,mR=-1;
@@ -215,25 +176,20 @@ async function buildData(params) {
   const today  = new Date().toISOString().slice(0,10);
   const mesIni = today.slice(0,8)+'01';
   const [mktFunnel, leadsHoje, leadsMes] = await Promise.all([
-    httpsGet(mktUrl('/platform/analytics/conversion_funnel')),
-    httpsGet(mktUrl(`/platform/contacts/search?page=1&page_size=1&created_at_from=${today}T00:00:00&created_at_to=${today}T23:59:59`)),
-    httpsGet(mktUrl(`/platform/contacts/search?page=1&page_size=1&created_at_from=${mesIni}T00:00:00&created_at_to=${today}T23:59:59`)),
+    mkt('/platform/analytics/conversion_funnel'),
+    mkt(`/platform/contacts/search?page=1&page_size=1&created_at_from=${today}T00:00:00&created_at_to=${today}T23:59:59`),
+    mkt(`/platform/contacts/search?page=1&page_size=1&created_at_from=${mesIni}T00:00:00&created_at_to=${today}T23:59:59`),
   ]);
 
-  const receita = sumArr(won);
-  const qtdWon  = won.length;
-  const stagesSimple = {};
-  STAGES.forEach(s => stagesSimple[s.id] = s.name);
+  const receita = sum(won), qtdWon = won.length;
 
   return {
-    meta: { pipeline_id: PIPELINE_ID, total_deals: filtered.length, stages: stagesSimple, users, gerado_em: new Date().toISOString() },
+    meta: { pipeline_id: PIPELINE_ID, total_deals: f.length, stages: STAGES_SIMPLE, users, gerado_em: new Date().toISOString() },
     captacao: {
       leads_whatsapp: byOrigin['WhatsApp']?.leads    || 0,
       leads_rd:       byOrigin['RD Station']?.leads  || 0,
       leads_site:     byOrigin['Site']?.leads        || 0,
-      leads_total: filtered.length,
-      leads_hoje:  leadsHoje?.total || 0,
-      leads_mes:   leadsMes?.total  || 0,
+      leads_total: f.length, leads_hoje: leadsHoje?.total||0, leads_mes: leadsMes?.total||0,
     },
     comercial: {
       agendamentos: cntAgend, reunioes_ocorridas: cntReun,
@@ -245,14 +201,14 @@ async function buildData(params) {
       presenca_reuniao:      pct(cntReun,  cntAgend),
       reuniao_para_venda:    pct(qtdWon,   cntReun),
       negociacao_para_venda: pct(qtdWon,   cntNegoc),
-      lead_para_venda:       pct(qtdWon,   filtered.length),
+      lead_para_venda:       pct(qtdWon,   f.length),
     },
     financeiro: {
       receita_fechada: Math.round(receita*100)/100,
-      ticket_medio:    qtdWon>0 ? Math.round(receita/qtdWon*100)/100 : 0,
+      ticket_medio: qtdWon>0 ? Math.round(receita/qtdWon*100)/100 : 0,
       receita_por_origem: Object.fromEntries(Object.entries(byOrigin).map(([k,v])=>[k,Math.round(v.revenue*100)/100])),
     },
-    funil_visual: funnelVisual, por_origem: byOrigin, por_responsavel: byOwner,
+    funil_visual: funnel, por_origem: byOrigin, por_responsavel: byOwner,
     perda_por_etapa: perda, marketing: { funnel: mktFunnel },
     insights: {
       melhor_canal_leads: cl, melhor_canal_vendas: cv, melhor_canal_receita: cr,
@@ -260,7 +216,7 @@ async function buildData(params) {
       etapa_maior_perda: Object.keys(perda).sort((a,b)=>perda[b]-perda[a])[0]||null,
       perda_por_etapa: perda,
     },
-    filtros_disponiveis: { users, stages: stagesSimple,
+    filtros_disponiveis: { users, stages: STAGES_SIMPLE,
       origens: ['WhatsApp','Site','RD Station','Instagram','Indicação','Evento','Outros'] },
   };
 }
@@ -272,16 +228,15 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
   const url = new URL(req.url, 'http://localhost');
-  const params = Object.fromEntries(url.searchParams);
   try {
-    const data = await buildData(params);
+    const data = await buildData(Object.fromEntries(url.searchParams));
     res.writeHead(200);
     res.end(JSON.stringify(data, null, 2));
   } catch(e) {
-    console.error('Erro:', e);
+    console.error(e);
     res.writeHead(500);
     res.end(JSON.stringify({ error: e.message }));
   }
 });
 
-server.listen(PORT, () => console.log(`ESC Dashboard API rodando na porta ${PORT}`));
+server.listen(PORT, () => console.log(`ESC Dashboard API na porta ${PORT}`));

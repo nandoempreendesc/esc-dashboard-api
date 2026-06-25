@@ -1,4 +1,5 @@
 <?php
+// VERSAO: 2.0 - API v1 CRM - 2026-06-25 13:13
 define('RD_CRM_TOKEN', '6a3be3a4c81c68001e67ea0a');
 define('RD_MKT_TOKEN', '745467e98d2287fcdd41eb572722b0c9');
 define('PIPELINE_ID',  '6a3c2697d2d223001fa3f0ad');

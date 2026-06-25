@@ -16,8 +16,8 @@ const STAGES = [
   { id: '6a3c2e038c080c001f52f8e6', name: 'Fechado Perdido',       order: 7 },
 ];
 
-const STAGE_ORDER = {}; // id => order
-const STAGE_NAME  = {}; // id => name
+const STAGE_ORDER = {};
+const STAGE_NAME  = {};
 STAGES.forEach(s => { STAGE_ORDER[s.id] = s.order; STAGE_NAME[s.id] = s.name; });
 
 const SID_AGEND   = '6a3c2697d2d223001fa3f0b1';
@@ -25,74 +25,79 @@ const SID_REUN    = '6a3c2697d2d223001fa3f0b2';
 const SID_NEGOC   = '6a3c2dfc1afd75001e199a2d';
 const SID_GANHO   = '6a3c2dff80f293001ef244bc';
 const SID_PERDIDO = '6a3c2e038c080c001f52f8e6';
-
 const POS_AGEND = 3, POS_REUN = 4, POS_NEGOC = 5;
 
 function httpsGet(url) {
   return new Promise((resolve) => {
+    console.log('GET:', url);
     const req = https.get(url, { headers: { 'Accept': 'application/json' } }, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
         try { resolve(JSON.parse(data)); }
-        catch(e) { console.error('JSON parse error:', e.message, 'url:', url); resolve(null); }
+        catch(e) { console.error('Parse error:', e.message); resolve(null); }
       });
     });
-    req.on('error', (e) => { console.error('HTTP error:', e.message, 'url:', url); resolve(null); });
-    req.setTimeout(20000, () => { req.abort(); resolve(null); });
+    req.on('error', e => { console.error('Req error:', e.message); resolve(null); });
+    req.setTimeout(25000, () => { req.destroy(); resolve(null); });
   });
 }
 
-function crmV2(path) {
-  // Encoda o filtro corretamente
-  const [base, qs] = path.includes('?') ? path.split('?') : [path, ''];
-  const params = new URLSearchParams(qs);
-  params.set('token', CRM_TOKEN);
-  return httpsGet(`https://api.rd.services/api/v2${base}?${params.toString()}`);
+// Monta URL sem encoding do filtro RDQL
+function crmUrl(path, extraParams = {}) {
+  let url = `https://crm.rdstation.com/api/v1${path}`;
+  const sep = url.includes('?') ? '&' : '?';
+  url += `${sep}token=${CRM_TOKEN}`;
+  Object.entries(extraParams).forEach(([k, v]) => {
+    url += `&${k}=${v}`;
+  });
+  return url;
 }
 
-function mkt(path) {
-  const [base, qs] = path.includes('?') ? path.split('?') : [path, ''];
-  const params = new URLSearchParams(qs);
-  params.set('token', MKT_TOKEN);
-  return httpsGet(`https://api.rd.services${base}?${params.toString()}`);
+function mktUrl(path) {
+  const sep = path.includes('?') ? '&' : '?';
+  return `https://api.rd.services${path}${sep}token=${MKT_TOKEN}`;
 }
 
 async function allDeals() {
   const all = [];
   let page = 1;
   while (page <= 10) {
-    const params = new URLSearchParams({
-      'filter': `pipeline_id:${PIPELINE_ID}`,
-      'page[number]': page,
-      'page[size]': 50,
-      'token': CRM_TOKEN
+    // API v1 — usa deal_pipeline_id diretamente, sem RDQL
+    const url = crmUrl('/deals', {
+      deal_pipeline_id: PIPELINE_ID,
+      page: page,
+      limit: 50,
+      order: 'updated_at',
+      direction: 'desc'
     });
-    const res = await httpsGet(`https://api.rd.services/api/v2/deals?${params.toString()}`);
-    const data = res?.data || [];
-    console.log(`Página ${page}: ${data.length} deals`);
+    const res = await httpsGet(url);
+    const data = res?.deals || [];
+    const total = res?.total || 0;
+    console.log(`Página ${page}: ${data.length} deals (total: ${total})`);
     if (data.length > 0) {
-      console.log('Primeiro deal:', JSON.stringify(data[0]).slice(0, 200));
+      const d = data[0];
+      console.log('Deal exemplo - name:', d.name, 'deal_stage_id:', d.deal_stage_id, 'win:', d.win, 'amount:', d.amount_montly_total);
     }
     all.push(...data);
-    if (data.length < 50) break;
+    if (all.length >= total || data.length === 0) break;
     page++;
   }
-  console.log(`Total deals carregados: ${all.length}`);
+  console.log('Total deals:', all.length);
   return all;
 }
 
 async function getUsers() {
-  const res = await crmV2('/users?page[size]=50');
+  const res = await httpsGet(crmUrl('/users', { limit: 50 }));
   const users = {};
-  (res?.data || []).forEach(u => users[u.id] = u.name);
+  (res?.users || []).forEach(u => users[u._id] = u.name);
   return users;
 }
 
 async function getSources() {
-  const res = await crmV2('/sources?page[size]=50');
+  const res = await httpsGet(crmUrl('/deal_sources', { limit: 50 }));
   const map = {};
-  (res?.data || []).forEach(s => map[s.id] = s.name);
+  (res?.deal_sources || []).forEach(s => map[s._id] = s.name);
   return map;
 }
 
@@ -102,22 +107,23 @@ function mapOrigin(name) {
   if (n.includes('site') || n.includes('web'))         return 'Site';
   if (n.includes('rd') || n.includes('formu') || n.includes('landing')) return 'RD Station';
   if (n.includes('instagram') || n.includes('insta'))  return 'Instagram';
-  if (n.includes('indica'))  return 'Indicação';
-  if (n.includes('evento'))  return 'Evento';
+  if (n.includes('indica')) return 'Indicação';
+  if (n.includes('evento')) return 'Evento';
   return 'Outros';
 }
 
-function dealVal(d)  { return parseFloat(d.total_price || 0); }
+// API v1: stage em deal_stage_id, status em win (true/false/null), valor em amount_montly_total
+function dealVal(d)  { return parseFloat(d.amount_montly_total || d.amount || 0); }
 function pct(a, b)   { return b > 0 ? Math.round((a/b)*1000)/10 : 0; }
 function sumArr(arr) { return arr.reduce((s,d) => s + dealVal(d), 0); }
-function stageOrd(d) { return STAGE_ORDER[d.stage_id] ?? -1; }
+function stageId(d)  { return d.deal_stage_id || d.stage_id || null; }
+function stageOrd(d) { return STAGE_ORDER[stageId(d)] ?? -1; }
 
 async function buildData(params) {
   const [deals, users, sourceMap] = await Promise.all([allDeals(), getUsers(), getSources()]);
 
-  // Log dos primeiros deals para debug
   if (deals.length > 0) {
-    console.log('Stage IDs dos deals:', deals.map(d => `${d.name}:${d.stage_id}:ord${stageOrd(d)}`).join(', '));
+    console.log('Stage IDs:', deals.map(d => `${d.name}:${stageId(d)}:ord${stageOrd(d)}`).join(' | '));
   }
 
   let filtered = [...deals];
@@ -129,14 +135,15 @@ async function buildData(params) {
       return true;
     });
   }
-  if (params.owner_id) filtered = filtered.filter(d => d.owner_id === params.owner_id);
-  if (params.stage_id) filtered = filtered.filter(d => d.stage_id === params.stage_id);
+  if (params.owner_id) filtered = filtered.filter(d => (d.user?._id || d.user_id) === params.owner_id);
+  if (params.stage_id) filtered = filtered.filter(d => stageId(d) === params.stage_id);
 
-  const won  = filtered.filter(d => d.status === 'won');
-  const lost = filtered.filter(d => d.status === 'lost');
-  const open = filtered.filter(d => d.status === 'ongoing');
+  // API v1: win=true ganho, win=false perdido, win=null em aberto
+  const won  = filtered.filter(d => d.win === true);
+  const lost = filtered.filter(d => d.win === false && d.win !== null && 'win' in d);
+  const open = filtered.filter(d => d.win === null || d.win === undefined || !('win' in d));
 
-  console.log(`Status - won:${won.length} lost:${lost.length} open:${open.length}`);
+  console.log(`won:${won.length} lost:${lost.length} open:${open.length}`);
 
   const cntAgend = open.filter(d => stageOrd(d) >= POS_AGEND).length;
   const cntReun  = open.filter(d => stageOrd(d) >= POS_REUN).length;
@@ -147,7 +154,7 @@ async function buildData(params) {
   const funnelVisual = STAGES.map(s => {
     let cnt, val;
     if (s.id === SID_GANHO || s.id === SID_PERDIDO) {
-      const arr = filtered.filter(d => d.stage_id === s.id);
+      const arr = filtered.filter(d => stageId(d) === s.id);
       cnt = arr.length; val = sumArr(arr);
     } else {
       const arr = open.filter(d => stageOrd(d) >= s.order);
@@ -160,25 +167,26 @@ async function buildData(params) {
 
   const byOrigin = {};
   filtered.forEach(d => {
-    const origin = mapOrigin(sourceMap[d.source_id] || '');
+    const srcId = d.deal_source?._id || d.source_id || '';
+    const origin = mapOrigin(sourceMap[srcId] || d.deal_source?.name || '');
     if (!byOrigin[origin]) byOrigin[origin] = { leads:0, won:0, revenue:0 };
     byOrigin[origin].leads++;
-    if (d.status === 'won') { byOrigin[origin].won++; byOrigin[origin].revenue += dealVal(d); }
+    if (d.win === true) { byOrigin[origin].won++; byOrigin[origin].revenue += dealVal(d); }
   });
 
   const byOwner = {};
   filtered.forEach(d => {
-    const name = users[d.owner_id] || 'Desconhecido';
+    const name = d.user?.name || users[d.user_id] || 'Desconhecido';
     if (!byOwner[name]) byOwner[name] = { total:0, won:0, lost:0, revenue:0, conv:0 };
     byOwner[name].total++;
-    if (d.status === 'won')  { byOwner[name].won++;  byOwner[name].revenue += dealVal(d); }
-    if (d.status === 'lost') byOwner[name].lost++;
+    if (d.win === true)  { byOwner[name].won++;  byOwner[name].revenue += dealVal(d); }
+    if (d.win === false && 'win' in d) byOwner[name].lost++;
   });
   Object.values(byOwner).forEach(o => o.conv = pct(o.won, o.total));
 
   const perda = {};
   lost.forEach(d => {
-    const name = STAGE_NAME[d.stage_id] || 'Sem etapa';
+    const name = STAGE_NAME[stageId(d)] || 'Sem etapa';
     perda[name] = (perda[name] || 0) + 1;
   });
 
@@ -196,9 +204,9 @@ async function buildData(params) {
   const today  = new Date().toISOString().slice(0,10);
   const mesIni = today.slice(0,8)+'01';
   const [mktFunnel, leadsHoje, leadsMes] = await Promise.all([
-    mkt('/platform/analytics/conversion_funnel'),
-    mkt(`/platform/contacts/search?page=1&page_size=1&created_at_from=${today}T00:00:00&created_at_to=${today}T23:59:59`),
-    mkt(`/platform/contacts/search?page=1&page_size=1&created_at_from=${mesIni}T00:00:00&created_at_to=${today}T23:59:59`),
+    httpsGet(mktUrl('/platform/analytics/conversion_funnel')),
+    httpsGet(mktUrl(`/platform/contacts/search?page=1&page_size=1&created_at_from=${today}T00:00:00&created_at_to=${today}T23:59:59`)),
+    httpsGet(mktUrl(`/platform/contacts/search?page=1&page_size=1&created_at_from=${mesIni}T00:00:00&created_at_to=${today}T23:59:59`)),
   ]);
 
   const receita = sumArr(won);
@@ -259,7 +267,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200);
     res.end(JSON.stringify(data, null, 2));
   } catch(e) {
-    console.error('Erro geral:', e);
+    console.error('Erro:', e);
     res.writeHead(500);
     res.end(JSON.stringify({ error: e.message }));
   }

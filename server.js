@@ -75,7 +75,7 @@ async function fetchNotesForDeals(dealIds) {
 
   for (const chunk of chunks) {
     await Promise.all(chunk.map(async id => {
-      const url = `https://api.rd.services/api/v2/deals/${id}/notes?page[size]=50&sort[registered_at]=desc&token=${CRM_TOKEN}`;
+      const url = `https://api.rd.services/crm/v2/deals/${id}/notes?page[size]=50&token=${CRM_TOKEN}`;
       const res = await get(url);
       results[id] = res?.data || [];
     }));

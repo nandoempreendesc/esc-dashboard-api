@@ -82,13 +82,22 @@ async function getSources() {
 
 function mapOrigin(name) {
   const n = (name || '').toLowerCase();
-  if (n.includes('whatsapp') || n.includes('zap'))    return 'WhatsApp';
-  if (n.includes('site') || n.includes('web'))         return 'Site';
-  if (n.includes('rd') || n.includes('formu') || n.includes('landing')) return 'RD Station';
-  if (n.includes('instagram') || n.includes('insta'))  return 'Instagram';
-  if (n.includes('indica')) return 'Indicação';
-  if (n.includes('evento')) return 'Evento';
-  return 'Outros';
+  if (n.includes('whatsapp') || n.includes('zap'))           return 'WhatsApp';
+  if (n.includes('instagram') || n.includes('insta'))        return 'Instagram';
+  if (n.includes('facebook') || n.includes('fb'))            return 'Facebook';
+  if (n.includes('linkedin'))                                return 'LinkedIn';
+  if (n.includes('social'))                                  return 'Redes Sociais';
+  if (n.includes('busca orgânica') || n.includes('busca organica') || n.includes('orgânic')) return 'Busca Orgânica';
+  if (n.includes('busca paga') || n.includes('paid') || n.includes('google ads')) return 'Busca Paga';
+  if (n.includes('email') || n.includes('e-mail'))           return 'E-mail';
+  if (n.includes('referência') || n.includes('referencia'))  return 'Referência';
+  if (n.includes('indica'))                                  return 'Indicação';
+  if (n.includes('evento') || n.includes('feira'))           return 'Evento';
+  if (n.includes('prospecção') || n.includes('prospeccao') || n.includes('ativa')) return 'Prospecção Ativa';
+  if (n.includes('cliente ativo'))                           return 'Cliente Ativo';
+  if (n.includes('tráfego direto') || n.includes('trafego direto') || n.includes('direto')) return 'Tráfego Direto';
+  if (n.includes('desconhecido'))                            return 'Desconhecido';
+  return name || 'Outros'; // retorna o nome real em vez de "Outros"
 }
 
 // API v1 campos corretos (confirmados nos logs):

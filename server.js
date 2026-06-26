@@ -39,9 +39,10 @@ function get(url) {
   });
 }
 
+// API v1 — funciona com token como query param
 function v1(path, params = {}) {
   let url = `https://crm.rdstation.com/api/v1${path}?token=${CRM_TOKEN}`;
-  Object.entries(params).forEach(([k, v]) => url += `&${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+  Object.entries(params).forEach(([k, v]) => url += `&${k}=${encodeURIComponent(v)}`);
   return get(url);
 }
 
@@ -50,40 +51,25 @@ function mkt(path) {
   return get(`https://api.rd.services${path}${sep}token=${MKT_TOKEN}`);
 }
 
+// API v1: deal_pipeline_id, retorna deals[]
 async function allDeals() {
   const all = [];
   let page = 1;
-  while (page <= 20) {
-    // Busca todos os deals e filtra pelo pipeline_id no código
-    // Evita problema de encoding do ":" no filter
-    const url = `https://api.rd.services/api/v2/deals?page[number]=${page}&page[size]=50&token=${CRM_TOKEN}`;
-    const res = await get(url);
-    const data = (res?.data || []).filter(d => d.pipeline_id === PIPELINE_ID);
-    const total_page = res?.data?.length || 0;
-    console.log(`Página ${page}: ${total_page} total, ${data.length} deste pipeline`);
+  while (page <= 10) {
+    const res = await v1('/deals', {
+      deal_pipeline_id: PIPELINE_ID,
+      page, limit: 50,
+      order: 'updated_at', direction: 'desc'
+    });
+    const data = res?.deals || [];
+    const total = res?.total || 0;
+    console.log(`Página ${page}: ${data.length} deals (total: ${total})`);
     all.push(...data);
-    if ((res?.data?.length || 0) < 50) break;
+    if (all.length >= total || data.length === 0) break;
     page++;
   }
-  console.log(`Total carregado: ${all.length}`);
+  console.log(`Total: ${all.length}`);
   return all;
-}
-
-async function fetchNotesForDeals(dealIds) {
-  // Busca notas de todos os deals em paralelo (máx 10 simultâneas)
-  const results = {};
-  const chunks = [];
-  for (let i = 0; i < dealIds.length; i += 10)
-    chunks.push(dealIds.slice(i, i + 10));
-
-  for (const chunk of chunks) {
-    await Promise.all(chunk.map(async id => {
-      const url = `https://api.rd.services/crm/v2/deals/${id}/notes?page[size]=50&token=${CRM_TOKEN}`;
-      const res = await get(url);
-      results[id] = res?.data || [];
-    }));
-  }
-  return results;
 }
 
 async function getUsers() {
@@ -100,48 +86,50 @@ async function getSources() {
   return m;
 }
 
+// Busca notas via API v2 (único endpoint que funciona para notas)
+async function fetchNotesForDeals(deals) {
+  const results = {};
+  // Usa o _id da v1 para buscar na v2
+  const chunks = [];
+  for (let i = 0; i < deals.length; i += 10)
+    chunks.push(deals.slice(i, i + 10));
+
+  for (const chunk of chunks) {
+    await Promise.all(chunk.map(async d => {
+      const id = d._id;
+      if (!id) return;
+      const url = `https://api.rd.services/crm/v2/deals/${id}/notes?page[size]=50&token=${CRM_TOKEN}`;
+      const res = await get(url);
+      results[id] = res?.data || [];
+    }));
+  }
+  return results;
+}
+
 function mapOrigin(name) {
   const n = (name || '').toLowerCase();
-  // Redes Sociais — tudo que é Social | X (orgânico)
   if (n.startsWith('social'))                                         return 'Redes Sociais';
-  // Tráfego Pago — Busca Paga | X
   if (n.startsWith('busca paga') || n.includes('paid'))              return 'Tráfego Pago';
-  // Busca Orgânica — Busca Orgânica | X
-  if (n.startsWith('busca org') || n.includes('org\u00e2nica') || n.includes('organica')) return 'Busca Orgânica';
-  // E-mail — Email | X
+  if (n.startsWith('busca org') || n.includes('orgânica') || n.includes('organica')) return 'Busca Orgânica';
   if (n.startsWith('email') || n.includes('e-mail'))                 return 'E-mail';
-  // Referência — Referência | site
-  if (n.startsWith('refer') || n.includes('refer\u00eancia'))       return 'Referência';
-  // Indicação
+  if (n.startsWith('refer') || n.includes('referência'))             return 'Referência';
   if (n.includes('indica'))                                          return 'Indicação';
-  // Evento / Feiras
   if (n.includes('evento') || n.includes('feira'))                   return 'Evento';
-  // Prospecção Ativa
   if (n.includes('prospec') || n.includes('ativa'))                  return 'Prospecção Ativa';
-  // Cliente Ativo
   if (n.includes('cliente ativo'))                                   return 'Cliente Ativo';
-  // WhatsApp (caso usado como origem)
   if (n.includes('whatsapp') || n.includes('zap'))                   return 'WhatsApp';
-  // Tudo mais → Outros
   return 'Outros';
 }
 
-// API v1 campos corretos (confirmados nos logs):
-// stage: deal_stage._id
-// valor: amount_total
-// status: win (true=ganho, false=perdido, null=aberto)
-// dono: user._id
-// fonte: deal_source._id
-
-// API v2: stage_id, total_price, status
-const stageId = d => d.stage_id || d.deal_stage?._id || null;
-const val     = d => parseFloat(d.total_price || d.amount_total || 0);
-const isWon   = d => d.status === 'won'     || d.win === true;
-const isLost  = d => d.status === 'lost'    || d.win === false;
-const isOpen  = d => d.status === 'ongoing' || (d.win === null || d.win === undefined);
+// API v1 campos: deal_stage._id, amount_total, win (true/false/null), user._id, deal_source._id
+const stageId = d => d.deal_stage?._id || null;
+const val     = d => parseFloat(d.amount_total || d.amount_montly || 0);
+const isWon   = d => d.win === true;
+const isLost  = d => d.win === false && d.win !== null && d.win !== undefined;
+const isOpen  = d => !isWon(d) && !isLost(d);
 const sOrd    = d => STAGE_ORDER[stageId(d)] ?? -1;
-const pct     = (a,b) => b > 0 ? Math.round((a/b)*1000)/10 : 0;
-const sum     = arr => arr.reduce((s,d) => s + val(d), 0);
+const pct     = (a, b) => b > 0 ? Math.round((a/b)*1000)/10 : 0;
+const sum     = arr => arr.reduce((s, d) => s + val(d), 0);
 
 async function buildData(p) {
   const [deals, users, sources] = await Promise.all([allDeals(), getUsers(), getSources()]);
@@ -151,26 +139,17 @@ async function buildData(p) {
     console.log(`Deal[0]: stage=${stageId(d)} ord=${sOrd(d)} val=${val(d)} win=${d.win}`);
   }
 
-  // Buscar notas de todos os deals do funil
-  const dealIds = deals.map(d => d.id).filter(Boolean);
-  const notesMap = await fetchNotesForDeals(dealIds);
-
-  // Interações = deals com pelo menos 1 nota cuja última anotação foi no mês/hoje
-  const today2   = new Date().toISOString().slice(0, 10);
-  const mesIni2  = today2.slice(0, 8) + '01';
-
-  let interacoesMes  = 0;
-  let interacoesHoje = 0;
-
-  for (const [dealId, notes] of Object.entries(notesMap)) {
+  // Buscar notas para interações
+  const notesMap = await fetchNotesForDeals(deals);
+  const today2  = new Date().toISOString().slice(0, 10);
+  const mesIni2 = today2.slice(0, 8) + '01';
+  let interacoesMes = 0, interacoesHoje = 0;
+  for (const notes of Object.values(notesMap)) {
     if (!notes.length) continue;
-    // Última anotação (já vem ordenada desc)
-    const lastNote = notes[0];
-    const lastDate = (lastNote.registered_at || lastNote.created_at || '').slice(0, 10);
-    if (lastDate >= mesIni2)  interacoesMes++;
-    if (lastDate === today2)  interacoesHoje++;
+    const lastDate = (notes[0].registered_at || notes[0].created_at || '').slice(0, 10);
+    if (lastDate >= mesIni2) interacoesMes++;
+    if (lastDate === today2) interacoesHoje++;
   }
-
   console.log(`Interações hoje: ${interacoesHoje} | mês: ${interacoesMes}`);
 
   let f = [...deals];
@@ -188,9 +167,7 @@ async function buildData(p) {
   const won  = f.filter(isWon);
   const lost = f.filter(isLost);
   const open = f.filter(isOpen);
-
   console.log(`won:${won.length} lost:${lost.length} open:${open.length}`);
-  console.log('Open stages:', open.map(d=>`${d.name}:${STAGE_NAME[stageId(d)]||'?'}:ord${sOrd(d)}:R$${val(d)}`).join(' | '));
 
   const cntAgend = open.filter(d => sOrd(d) >= POS_AGEND).length;
   const cntReun  = open.filter(d => sOrd(d) >= POS_REUN).length;
@@ -198,17 +175,15 @@ async function buildData(p) {
   const valNegoc = sum(open.filter(d => sOrd(d) >= POS_NEGOC));
   const valPipe  = sum(open);
 
-  // Funil snapshot real — mostra onde cada deal está agora
+  // Funil snapshot real
   const funnel = STAGES.map(s => {
     const arr = f.filter(d => stageId(d) === s.id);
     return { stage: s.name, count: arr.length, value: Math.round(sum(arr)*100)/100 };
   });
 
-  console.log('Funil:', funnel.map(x=>`${x.stage}:${x.count}:R$${x.value}`).join(', '));
-
   const byOrigin = {};
   f.forEach(d => {
-    const origin = mapOrigin(sources[d.source_id] || d.deal_source?._id && sources[d.deal_source._id] || '');
+    const origin = mapOrigin(sources[d.deal_source?._id] || d.deal_source?.name || '');
     if (!byOrigin[origin]) byOrigin[origin] = { leads:0, won:0, revenue:0 };
     byOrigin[origin].leads++;
     if (isWon(d)) { byOrigin[origin].won++; byOrigin[origin].revenue += val(d); }
@@ -216,7 +191,7 @@ async function buildData(p) {
 
   const byOwner = {};
   f.forEach(d => {
-    const name = users[d.owner_id] || d.user?.name || 'Desconhecido';
+    const name = d.user?.name || users[d.user?._id] || 'Desconhecido';
     if (!byOwner[name]) byOwner[name] = { total:0, won:0, lost:0, revenue:0, conv:0 };
     byOwner[name].total++;
     if (isWon(d))  { byOwner[name].won++;  byOwner[name].revenue += val(d); }
@@ -243,11 +218,8 @@ async function buildData(p) {
 
   const today  = new Date().toISOString().slice(0,10);
   const mesIni = today.slice(0,8)+'01';
-  // Leads hoje e mês — conta deals criados no pipeline no período
   const allDealsHoje = f.filter(d => (d.created_at||'').slice(0,10) === today);
   const allDealsMes  = f.filter(d => (d.created_at||'').slice(0,10) >= mesIni);
-  const leadsHoje = { total: allDealsHoje.length };
-  const leadsMes  = { total: allDealsMes.length  };
   const [mktFunnel] = await Promise.all([
     mkt('/platform/analytics/conversion_funnel'),
   ]);
@@ -257,10 +229,12 @@ async function buildData(p) {
   return {
     meta: { pipeline_id: PIPELINE_ID, total_deals: f.length, stages: STAGES_SIMPLE, users, gerado_em: new Date().toISOString() },
     captacao: {
-      leads_whatsapp: byOrigin['WhatsApp']?.leads    || 0,
-      leads_rd:       byOrigin['RD Station']?.leads  || 0,
-      leads_site:     byOrigin['Site']?.leads        || 0,
-      leads_total: f.length, leads_hoje: leadsHoje?.total||0, leads_mes: leadsMes?.total||0,
+      leads_whatsapp: byOrigin['WhatsApp']?.leads   || 0,
+      leads_rd:       byOrigin['RD Station']?.leads || 0,
+      leads_site:     byOrigin['Site']?.leads       || 0,
+      leads_total: f.length,
+      leads_hoje:  allDealsHoje.length,
+      leads_mes:   allDealsMes.length,
       interacoes_mes:  interacoesMes,
       interacoes_hoje: interacoesHoje,
     },
@@ -313,4 +287,3 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => console.log(`ESC Dashboard API na porta ${PORT}`));
-// patch

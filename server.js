@@ -53,14 +53,16 @@ function mkt(path) {
 async function allDeals() {
   const all = [];
   let page = 1;
-  while (page <= 10) {
-    // API v2 — retorna campo 'id' correto para busca de notas
-    const url = `https://api.rd.services/api/v2/deals?filter=pipeline_id:${PIPELINE_ID}&page[number]=${page}&page[size]=50&token=${CRM_TOKEN}`;
+  while (page <= 20) {
+    // Busca todos os deals e filtra pelo pipeline_id no código
+    // Evita problema de encoding do ":" no filter
+    const url = `https://api.rd.services/api/v2/deals?page[number]=${page}&page[size]=50&token=${CRM_TOKEN}`;
     const res = await get(url);
-    const data = res?.data || [];
-    console.log(`Página ${page}: ${data.length} deals`);
+    const data = (res?.data || []).filter(d => d.pipeline_id === PIPELINE_ID);
+    const total_page = res?.data?.length || 0;
+    console.log(`Página ${page}: ${total_page} total, ${data.length} deste pipeline`);
     all.push(...data);
-    if (data.length < 50) break;
+    if ((res?.data?.length || 0) < 50) break;
     page++;
   }
   console.log(`Total carregado: ${all.length}`);

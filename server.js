@@ -92,9 +92,10 @@ async function fetchNotesForDeals(deals) {
     chunks.push(deals.slice(i, i + 10));
   for (const chunk of chunks) {
     await Promise.all(chunk.map(async d => {
-      if (!d.id) return;
-      const res = await get(`https://api.rd.services/crm/v2/deals/${d.id}/notes?page[size]=50&token=${CRM_TOKEN}`);
-      results[d.id] = res?.data || [];
+      const id = d.id || d._id;
+      if (!id) return;
+      const res = await get(`https://api.rd.services/crm/v2/deals/${id}/notes?page[size]=5&token=${CRM_TOKEN}`);
+      results[id] = res?.data || [];
     }));
   }
   return results;
@@ -221,6 +222,8 @@ async function buildData(p) {
       leads_total: f.length,
       leads_hoje:  allDealsHoje.length,
       leads_mes:   allDealsMes.length,
+      interacoes_hoje: interacoes.hoje,
+      interacoes_mes:  interacoes.mes,
       interacoes_mes:  interacoesMes,
       interacoes_hoje: interacoesHoje,
     },

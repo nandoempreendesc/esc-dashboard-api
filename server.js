@@ -82,22 +82,28 @@ async function getSources() {
 
 function mapOrigin(name) {
   const n = (name || '').toLowerCase();
-  if (n.includes('whatsapp') || n.includes('zap'))           return 'WhatsApp';
-  if (n.includes('instagram') || n.includes('insta'))        return 'Instagram';
-  if (n.includes('facebook') || n.includes('fb'))            return 'Facebook';
-  if (n.includes('linkedin'))                                return 'LinkedIn';
-  if (n.includes('social'))                                  return 'Redes Sociais';
-  if (n.includes('busca orgânica') || n.includes('busca organica') || n.includes('orgânic')) return 'Busca Orgânica';
-  if (n.includes('busca paga') || n.includes('paid') || n.includes('google ads')) return 'Busca Paga';
-  if (n.includes('email') || n.includes('e-mail'))           return 'E-mail';
-  if (n.includes('referência') || n.includes('referencia'))  return 'Referência';
-  if (n.includes('indica'))                                  return 'Indicação';
-  if (n.includes('evento') || n.includes('feira'))           return 'Evento';
-  if (n.includes('prospecção') || n.includes('prospeccao') || n.includes('ativa')) return 'Prospecção Ativa';
-  if (n.includes('cliente ativo'))                           return 'Cliente Ativo';
-  if (n.includes('tráfego direto') || n.includes('trafego direto') || n.includes('direto')) return 'Tráfego Direto';
-  if (n.includes('desconhecido'))                            return 'Desconhecido';
-  return name || 'Outros'; // retorna o nome real em vez de "Outros"
+  // Redes Sociais — tudo que é Social | X (orgânico)
+  if (n.startsWith('social'))                                         return 'Redes Sociais';
+  // Tráfego Pago — Busca Paga | X
+  if (n.startsWith('busca paga') || n.includes('paid'))              return 'Tráfego Pago';
+  // Busca Orgânica — Busca Orgânica | X
+  if (n.startsWith('busca org') || n.includes('org\u00e2nica') || n.includes('organica')) return 'Busca Orgânica';
+  // E-mail — Email | X
+  if (n.startsWith('email') || n.includes('e-mail'))                 return 'E-mail';
+  // Referência — Referência | site
+  if (n.startsWith('refer') || n.includes('refer\u00eancia'))       return 'Referência';
+  // Indicação
+  if (n.includes('indica'))                                          return 'Indicação';
+  // Evento / Feiras
+  if (n.includes('evento') || n.includes('feira'))                   return 'Evento';
+  // Prospecção Ativa
+  if (n.includes('prospec') || n.includes('ativa'))                  return 'Prospecção Ativa';
+  // Cliente Ativo
+  if (n.includes('cliente ativo'))                                   return 'Cliente Ativo';
+  // WhatsApp (caso usado como origem)
+  if (n.includes('whatsapp') || n.includes('zap'))                   return 'WhatsApp';
+  // Tudo mais → Outros
+  return 'Outros';
 }
 
 // API v1 campos corretos (confirmados nos logs):

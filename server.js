@@ -66,6 +66,23 @@ async function allDeals() {
   return all;
 }
 
+async function fetchNotesForDeals(dealIds) {
+  // Busca notas de todos os deals em paralelo (máx 10 simultâneas)
+  const results = {};
+  const chunks = [];
+  for (let i = 0; i < dealIds.length; i += 10)
+    chunks.push(dealIds.slice(i, i + 10));
+
+  for (const chunk of chunks) {
+    await Promise.all(chunk.map(async id => {
+      const url = `https://api.rd.services/api/v2/deals/${id}/notes?page[size]=50&sort[registered_at]=desc&token=${CRM_TOKEN}`;
+      const res = await get(url);
+      results[id] = res?.data || [];
+    }));
+  }
+  return results;
+}
+
 async function getUsers() {
   const res = await v1('/users', { limit: 50 });
   const u = {};
@@ -130,6 +147,28 @@ async function buildData(p) {
     console.log(`Deal[0]: stage=${stageId(d)} ord=${sOrd(d)} val=${val(d)} win=${d.win}`);
   }
 
+  // Buscar notas de todos os deals do funil
+  const dealIds = deals.map(d => d.id);
+  const notesMap = await fetchNotesForDeals(dealIds);
+
+  // Interações = deals com pelo menos 1 nota cuja última anotação foi no mês/hoje
+  const today2   = new Date().toISOString().slice(0, 10);
+  const mesIni2  = today2.slice(0, 8) + '01';
+
+  let interacoesMes  = 0;
+  let interacoesHoje = 0;
+
+  for (const [dealId, notes] of Object.entries(notesMap)) {
+    if (!notes.length) continue;
+    // Última anotação (já vem ordenada desc)
+    const lastNote = notes[0];
+    const lastDate = (lastNote.registered_at || lastNote.created_at || '').slice(0, 10);
+    if (lastDate >= mesIni2)  interacoesMes++;
+    if (lastDate === today2)  interacoesHoje++;
+  }
+
+  console.log(`Interações hoje: ${interacoesHoje} | mês: ${interacoesMes}`);
+
   let f = [...deals];
   if (p.date_from || p.date_to) {
     f = f.filter(d => {
@@ -155,16 +194,10 @@ async function buildData(p) {
   const valNegoc = sum(open.filter(d => sOrd(d) >= POS_NEGOC));
   const valPipe  = sum(open);
 
+  // Funil snapshot real — mostra onde cada deal está agora
   const funnel = STAGES.map(s => {
-    let cnt, v;
-    if (s.id === SID_GANHO || s.id === SID_PERDIDO) {
-      const arr = f.filter(d => stageId(d) === s.id);
-      cnt = arr.length; v = sum(arr);
-    } else {
-      const arr = open.filter(d => sOrd(d) >= s.order);
-      cnt = arr.length; v = sum(arr);
-    }
-    return { stage: s.name, count: cnt, value: Math.round(v*100)/100 };
+    const arr = f.filter(d => stageId(d) === s.id);
+    return { stage: s.name, count: arr.length, value: Math.round(sum(arr)*100)/100 };
   });
 
   console.log('Funil:', funnel.map(x=>`${x.stage}:${x.count}:R$${x.value}`).join(', '));
@@ -224,6 +257,8 @@ async function buildData(p) {
       leads_rd:       byOrigin['RD Station']?.leads  || 0,
       leads_site:     byOrigin['Site']?.leads        || 0,
       leads_total: f.length, leads_hoje: leadsHoje?.total||0, leads_mes: leadsMes?.total||0,
+      interacoes_mes:  interacoesMes,
+      interacoes_hoje: interacoesHoje,
     },
     comercial: {
       agendamentos: cntAgend, reunioes_ocorridas: cntReun,

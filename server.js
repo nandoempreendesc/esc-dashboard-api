@@ -94,7 +94,7 @@ async function fetchNotesForDeals(deals) {
     await Promise.all(chunk.map(async d => {
       const id = d.id || d._id;
       if (!id) return;
-      const res = await get(`https://api.rd.services/crm/v2/deals/${id}/notes?page[size]=5&token=${CRM_TOKEN}`);
+      const res = await get(`https://api.rd.services/api/v2/deals/${id}/notes?page[size]=5&token=${CRM_TOKEN}`);
       results[id] = res?.data || [];
     }));
   }

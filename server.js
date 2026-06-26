@@ -54,12 +54,13 @@ async function allDeals() {
   const all = [];
   let page = 1;
   while (page <= 10) {
-    const res = await v1('/deals', { deal_pipeline_id: PIPELINE_ID, page, limit: 50, order: 'updated_at', direction: 'desc' });
-    const data = res?.deals || [];
-    const total = res?.total || 0;
-    console.log(`Página ${page}: ${data.length} deals (total: ${total})`);
+    // API v2 — retorna campo 'id' correto para busca de notas
+    const url = `https://api.rd.services/api/v2/deals?filter=pipeline_id:${PIPELINE_ID}&page[number]=${page}&page[size]=50&token=${CRM_TOKEN}`;
+    const res = await get(url);
+    const data = res?.data || [];
+    console.log(`Página ${page}: ${data.length} deals`);
     all.push(...data);
-    if (all.length >= total || data.length === 0) break;
+    if (data.length < 50) break;
     page++;
   }
   console.log(`Total carregado: ${all.length}`);
@@ -130,11 +131,12 @@ function mapOrigin(name) {
 // dono: user._id
 // fonte: deal_source._id
 
-const stageId = d => d.deal_stage?._id || null;
-const val     = d => parseFloat(d.amount_total || d.amount_montly || 0);
-const isWon   = d => d.win === true;
-const isLost  = d => d.win === false;
-const isOpen  = d => d.win === null || d.win === undefined;
+// API v2: stage_id, total_price, status
+const stageId = d => d.stage_id || d.deal_stage?._id || null;
+const val     = d => parseFloat(d.total_price || d.amount_total || 0);
+const isWon   = d => d.status === 'won'     || d.win === true;
+const isLost  = d => d.status === 'lost'    || d.win === false;
+const isOpen  = d => d.status === 'ongoing' || (d.win === null || d.win === undefined);
 const sOrd    = d => STAGE_ORDER[stageId(d)] ?? -1;
 const pct     = (a,b) => b > 0 ? Math.round((a/b)*1000)/10 : 0;
 const sum     = arr => arr.reduce((s,d) => s + val(d), 0);
@@ -148,7 +150,7 @@ async function buildData(p) {
   }
 
   // Buscar notas de todos os deals do funil
-  const dealIds = deals.map(d => d.id);
+  const dealIds = deals.map(d => d.id).filter(Boolean);
   const notesMap = await fetchNotesForDeals(dealIds);
 
   // Interações = deals com pelo menos 1 nota cuja última anotação foi no mês/hoje
@@ -204,7 +206,7 @@ async function buildData(p) {
 
   const byOrigin = {};
   f.forEach(d => {
-    const origin = mapOrigin(sources[d.deal_source?._id] || d.deal_source?.name || '');
+    const origin = mapOrigin(sources[d.source_id] || d.deal_source?._id && sources[d.deal_source._id] || '');
     if (!byOrigin[origin]) byOrigin[origin] = { leads:0, won:0, revenue:0 };
     byOrigin[origin].leads++;
     if (isWon(d)) { byOrigin[origin].won++; byOrigin[origin].revenue += val(d); }
@@ -212,7 +214,7 @@ async function buildData(p) {
 
   const byOwner = {};
   f.forEach(d => {
-    const name = d.user?.name || users[d.user?._id] || 'Desconhecido';
+    const name = users[d.owner_id] || d.user?.name || 'Desconhecido';
     if (!byOwner[name]) byOwner[name] = { total:0, won:0, lost:0, revenue:0, conv:0 };
     byOwner[name].total++;
     if (isWon(d))  { byOwner[name].won++;  byOwner[name].revenue += val(d); }

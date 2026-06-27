@@ -84,27 +84,18 @@ async function getSources() {
   return m;
 }
 
-// Notas via API v2
-async function fetchNotesForDeals(deals) {
-  const results = {};
-  const chunks = [];
-  for (let i = 0; i < deals.length; i += 5)
-    chunks.push(deals.slice(i, i + 5));
-  for (const chunk of chunks) {
-    await Promise.all(chunk.map(async d => {
-      const id = d.id || d._id;
-      if (!id) return;
-      const url = `https://api.rd.services/api/v2/deals/${id}/notes?page[size]=5&token=${MKT_TOKEN}`;
-      const res = await get(url);
-      const notes = res?.data || [];
-      if (notes.length > 0) {
-        console.log(`Nota encontrada: deal=${id} date=${notes[0].registered_at}`);
-      }
-      results[id] = notes;
-    }));
+// Interações baseadas em updated_at dos deals
+// Conta deals que foram atualizados hoje/no mês (inclui notas, mudança de etapa, etc.)
+function calcInteracoes(deals) {
+  const today  = new Date().toISOString().slice(0, 10);
+  const mesIni = today.slice(0, 8) + '01';
+  let hoje = 0, mes = 0;
+  for (const d of deals) {
+    const updated = (d.updated_at || d.last_activity_content || '').slice(0, 10);
+    if (updated === today) hoje++;
+    if (updated >= mesIni) mes++;
   }
-  console.log(`Total deals com notas: ${Object.values(results).filter(n => n.length > 0).length}`);
-  return results;
+  return { hoje, mes };
 }
 
 function mapOrigin(name) {
@@ -135,17 +126,16 @@ const sum     = arr => arr.reduce((s, d) => s + val(d), 0);
 async function buildData(p) {
   const [deals, users, sources] = await Promise.all([allDeals(), getUsers(), getSources()]);
 
-  // Notas para interações
-  const notesMap = await fetchNotesForDeals(deals);
+  // Interações via updated_at dos deals
   const today2  = new Date().toISOString().slice(0, 10);
   const mesIni2 = today2.slice(0, 8) + '01';
   let interacoesMes = 0, interacoesHoje = 0;
-  for (const notes of Object.values(notesMap)) {
-    if (!notes.length) continue;
-    const lastDate = (notes[0].registered_at || '').slice(0, 10);
-    if (lastDate >= mesIni2) interacoesMes++;
-    if (lastDate === today2) interacoesHoje++;
+  for (const d of deals) {
+    const updated = (d.updated_at || '').slice(0, 10);
+    if (updated >= mesIni2) interacoesMes++;
+    if (updated === today2) interacoesHoje++;
   }
+  console.log(`Interações hoje: ${interacoesHoje} | mês: ${interacoesMes}`);
 
   let f = [...deals];
   if (p.date_from || p.date_to) {
@@ -228,10 +218,8 @@ async function buildData(p) {
       leads_total: f.length,
       leads_hoje:  allDealsHoje.length,
       leads_mes:   allDealsMes.length,
-      interacoes_hoje: interacoes.hoje,
-      interacoes_mes:  interacoes.mes,
-      interacoes_mes:  interacoesMes,
       interacoes_hoje: interacoesHoje,
+      interacoes_mes:  interacoesMes,
     },
     comercial: {
       agendamentos: cntAgend, reunioes_ocorridas: cntReun,

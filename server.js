@@ -34,15 +34,16 @@ function get(url) {
       res.on('data', c => d += c);
       res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
     });
-    req.on('error', e => { console.error('GET error:', e.message, url.slice(0,80)); resolve(null); });
+    req.on('error', () => resolve(null));
     req.setTimeout(25000, () => { req.destroy(); resolve(null); });
   });
 }
 
-// API v2 com token
-function crm2(path) {
-  const sep = path.includes('?') ? '&' : '?';
-  return get(`https://api.rd.services/api/v2${path}${sep}token=${CRM_TOKEN}`);
+// API v1 — funciona com token como query param
+function v1(path, params = {}) {
+  let url = `https://crm.rdstation.com/api/v1${path}?token=${CRM_TOKEN}`;
+  Object.entries(params).forEach(([k, v]) => url += `&${k}=${encodeURIComponent(v)}`);
+  return get(url);
 }
 
 function mkt(path) {
@@ -50,20 +51,21 @@ function mkt(path) {
   return get(`https://api.rd.services${path}${sep}token=${MKT_TOKEN}`);
 }
 
-// API v2 deals — filter com encodeURIComponent (funciona conforme confirmado)
+// API v1: deal_pipeline_id, retorna deals[]
 async function allDeals() {
   const all = [];
   let page = 1;
-  const filter = encodeURIComponent(`pipeline_id:${PIPELINE_ID}`);
   while (page <= 10) {
-    const res = await crm2(`/deals?filter=${filter}&page[number]=${page}&page[size]=50`);
-    const data = res?.data || [];
-    console.log(`Página ${page}: ${data.length} deals`);
-    if (page === 1 && data.length > 0) {
-      console.log(`Deal[0]: id=${data[0].id} stage=${data[0].stage_id} status=${data[0].status} price=${data[0].total_price}`);
-    }
+    const res = await v1('/deals', {
+      deal_pipeline_id: PIPELINE_ID,
+      page, limit: 50,
+      order: 'updated_at', direction: 'desc'
+    });
+    const data = res?.deals || [];
+    const total = res?.total || 0;
+    console.log(`Página ${page}: ${data.length} deals (total: ${total})`);
     all.push(...data);
-    if (data.length < 50) break;
+    if (all.length >= total || data.length === 0) break;
     page++;
   }
   console.log(`Total: ${all.length}`);
@@ -71,30 +73,34 @@ async function allDeals() {
 }
 
 async function getUsers() {
-  const res = await crm2('/users?page[size]=50');
+  const res = await v1('/users', { limit: 50 });
   const u = {};
-  (res?.data || []).forEach(x => u[x.id] = x.name);
+  (res?.users || []).forEach(x => u[x._id] = x.name);
   return u;
 }
 
 async function getSources() {
-  const res = await crm2('/sources?page[size]=50');
+  const res = await v1('/deal_sources', { limit: 50 });
   const m = {};
-  (res?.data || []).forEach(x => m[x.id] = x.name);
+  (res?.deal_sources || []).forEach(x => m[x._id] = x.name);
   return m;
 }
 
-// Notas via API v2
+// Busca notas via API v2 (único endpoint que funciona para notas)
 async function fetchNotesForDeals(deals) {
   const results = {};
+  // Usa o _id da v1 para buscar na v2
   const chunks = [];
   for (let i = 0; i < deals.length; i += 10)
     chunks.push(deals.slice(i, i + 10));
+
   for (const chunk of chunks) {
     await Promise.all(chunk.map(async d => {
-      if (!d.id) return;
-      const res = await get(`https://api.rd.services/crm/v2/deals/${d.id}/notes?page[size]=50&token=${CRM_TOKEN}`);
-      results[d.id] = res?.data || [];
+      const id = d._id;
+      if (!id) return;
+      const url = `https://api.rd.services/crm/v2/deals/${id}/notes?page[size]=50&token=${CRM_TOKEN}`;
+      const res = await get(url);
+      results[id] = res?.data || [];
     }));
   }
   return results;
@@ -102,25 +108,25 @@ async function fetchNotesForDeals(deals) {
 
 function mapOrigin(name) {
   const n = (name || '').toLowerCase();
-  if (n.startsWith('social'))                                    return 'Redes Sociais';
-  if (n.startsWith('busca paga') || n.includes('paid'))         return 'Tráfego Pago';
+  if (n.startsWith('social'))                                         return 'Redes Sociais';
+  if (n.startsWith('busca paga') || n.includes('paid'))              return 'Tráfego Pago';
   if (n.startsWith('busca org') || n.includes('orgânica') || n.includes('organica')) return 'Busca Orgânica';
-  if (n.startsWith('email') || n.includes('e-mail'))            return 'E-mail';
-  if (n.startsWith('refer') || n.includes('referência'))        return 'Referência';
-  if (n.includes('indica'))                                     return 'Indicação';
-  if (n.includes('evento') || n.includes('feira'))              return 'Evento';
-  if (n.includes('prospec') || n.includes('ativa'))             return 'Prospecção Ativa';
-  if (n.includes('cliente ativo'))                              return 'Cliente Ativo';
-  if (n.includes('whatsapp') || n.includes('zap'))              return 'WhatsApp';
+  if (n.startsWith('email') || n.includes('e-mail'))                 return 'E-mail';
+  if (n.startsWith('refer') || n.includes('referência'))             return 'Referência';
+  if (n.includes('indica'))                                          return 'Indicação';
+  if (n.includes('evento') || n.includes('feira'))                   return 'Evento';
+  if (n.includes('prospec') || n.includes('ativa'))                  return 'Prospecção Ativa';
+  if (n.includes('cliente ativo'))                                   return 'Cliente Ativo';
+  if (n.includes('whatsapp') || n.includes('zap'))                   return 'WhatsApp';
   return 'Outros';
 }
 
-// API v2 campos: stage_id, total_price, status, owner_id, source_id
-const stageId = d => d.stage_id || null;
-const val     = d => parseFloat(d.total_price || 0);
-const isWon   = d => d.status === 'won';
-const isLost  = d => d.status === 'lost';
-const isOpen  = d => d.status === 'ongoing';
+// API v1 campos: deal_stage._id, amount_total, win (true/false/null), user._id, deal_source._id
+const stageId = d => d.deal_stage?._id || null;
+const val     = d => parseFloat(d.amount_total || d.amount_montly || 0);
+const isWon   = d => d.win === true;
+const isLost  = d => d.win === false && d.win !== null && d.win !== undefined;
+const isOpen  = d => !isWon(d) && !isLost(d);
 const sOrd    = d => STAGE_ORDER[stageId(d)] ?? -1;
 const pct     = (a, b) => b > 0 ? Math.round((a/b)*1000)/10 : 0;
 const sum     = arr => arr.reduce((s, d) => s + val(d), 0);
@@ -128,17 +134,23 @@ const sum     = arr => arr.reduce((s, d) => s + val(d), 0);
 async function buildData(p) {
   const [deals, users, sources] = await Promise.all([allDeals(), getUsers(), getSources()]);
 
-  // Notas para interações
+  if (deals.length > 0) {
+    const d = deals[0];
+    console.log(`Deal[0]: stage=${stageId(d)} ord=${sOrd(d)} val=${val(d)} win=${d.win}`);
+  }
+
+  // Buscar notas para interações
   const notesMap = await fetchNotesForDeals(deals);
   const today2  = new Date().toISOString().slice(0, 10);
   const mesIni2 = today2.slice(0, 8) + '01';
   let interacoesMes = 0, interacoesHoje = 0;
   for (const notes of Object.values(notesMap)) {
     if (!notes.length) continue;
-    const lastDate = (notes[0].registered_at || '').slice(0, 10);
+    const lastDate = (notes[0].registered_at || notes[0].created_at || '').slice(0, 10);
     if (lastDate >= mesIni2) interacoesMes++;
     if (lastDate === today2) interacoesHoje++;
   }
+  console.log(`Interações hoje: ${interacoesHoje} | mês: ${interacoesMes}`);
 
   let f = [...deals];
   if (p.date_from || p.date_to) {
@@ -149,7 +161,7 @@ async function buildData(p) {
       return true;
     });
   }
-  if (p.owner_id) f = f.filter(d => d.owner_id === p.owner_id);
+  if (p.owner_id) f = f.filter(d => (d.user?._id) === p.owner_id);
   if (p.stage_id) f = f.filter(d => stageId(d) === p.stage_id);
 
   const won  = f.filter(isWon);
@@ -171,7 +183,7 @@ async function buildData(p) {
 
   const byOrigin = {};
   f.forEach(d => {
-    const origin = mapOrigin(sources[d.source_id] || '');
+    const origin = mapOrigin(sources[d.deal_source?._id] || d.deal_source?.name || '');
     if (!byOrigin[origin]) byOrigin[origin] = { leads:0, won:0, revenue:0 };
     byOrigin[origin].leads++;
     if (isWon(d)) { byOrigin[origin].won++; byOrigin[origin].revenue += val(d); }
@@ -179,7 +191,7 @@ async function buildData(p) {
 
   const byOwner = {};
   f.forEach(d => {
-    const name = users[d.owner_id] || 'Desconhecido';
+    const name = d.user?.name || users[d.user?._id] || 'Desconhecido';
     if (!byOwner[name]) byOwner[name] = { total:0, won:0, lost:0, revenue:0, conv:0 };
     byOwner[name].total++;
     if (isWon(d))  { byOwner[name].won++;  byOwner[name].revenue += val(d); }
@@ -208,7 +220,9 @@ async function buildData(p) {
   const mesIni = today.slice(0,8)+'01';
   const allDealsHoje = f.filter(d => (d.created_at||'').slice(0,10) === today);
   const allDealsMes  = f.filter(d => (d.created_at||'').slice(0,10) >= mesIni);
-  const [mktFunnel] = await Promise.all([mkt('/platform/analytics/conversion_funnel')]);
+  const [mktFunnel] = await Promise.all([
+    mkt('/platform/analytics/conversion_funnel'),
+  ]);
 
   const receita = sum(won), qtdWon = won.length;
 

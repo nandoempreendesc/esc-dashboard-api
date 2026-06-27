@@ -1,10 +1,9 @@
 const http  = require('http');
 const https = require('https');
 
-const CRM_TOKEN     = '6a3be3a4c81c68001e67ea0a';
-const MKT_TOKEN     = '745467e98d2287fcdd41eb572722b0c9';
-const PRIVATE_TOKEN = 'd98d22295a52e978295b2faab2305747';
-const PIPELINE_ID   = '6a3c2697d2d223001fa3f0ad';
+const CRM_TOKEN   = '6a3be3a4c81c68001e67ea0a';
+const MKT_TOKEN   = '745467e98d2287fcdd41eb572722b0c9';
+const PIPELINE_ID = '6a3c2697d2d223001fa3f0ad';
 const PORT = process.env.PORT || 3000;
 
 const STAGES = [
@@ -24,6 +23,8 @@ STAGES.forEach(s => {
   STAGES_SIMPLE[s.id] = s.name;
 });
 
+const SID_GANHO   = '6a3c2dff80f293001ef244bc';
+const SID_PERDIDO = '6a3c2e038c080c001f52f8e6';
 const POS_AGEND = 3, POS_REUN = 4, POS_NEGOC = 5;
 
 function get(url) {
@@ -38,6 +39,7 @@ function get(url) {
   });
 }
 
+// API v1 — funciona com token como query param
 function v1(path, params = {}) {
   let url = `https://crm.rdstation.com/api/v1${path}?token=${CRM_TOKEN}`;
   Object.entries(params).forEach(([k, v]) => url += `&${k}=${encodeURIComponent(v)}`);
@@ -49,6 +51,7 @@ function mkt(path) {
   return get(`https://api.rd.services${path}${sep}token=${MKT_TOKEN}`);
 }
 
+// API v1: deal_pipeline_id, retorna deals[]
 async function allDeals() {
   const all = [];
   let page = 1;
@@ -83,47 +86,23 @@ async function getSources() {
   return m;
 }
 
-// Testa os 3 tokens nas notas e usa o que funcionar
+// Busca notas via API v2 (único endpoint que funciona para notas)
 async function fetchNotesForDeals(deals) {
   const results = {};
-
-  // Primeiro testa qual token funciona com o primeiro deal
-  const testId = deals[0]?._id;
-  let workingToken = null;
-
-  if (testId) {
-    for (const [name, token] of [['instancia', CRM_TOKEN], ['publico', MKT_TOKEN], ['privado', PRIVATE_TOKEN]]) {
-      const url = `https://api.rd.services/api/v2/deals/${testId}/notes?page[size]=1&token=${token}`;
-      const res = await get(url);
-      if (res?.data !== undefined) {
-        console.log(`Token ${name} funciona para notas!`);
-        workingToken = token;
-        break;
-      } else {
-        console.log(`Token ${name} NÃO funciona para notas`);
-      }
-    }
-  }
-
-  if (!workingToken) {
-    console.log('Nenhum token funciona para notas — usando updated_at como fallback');
-    return null; // sinaliza para usar updated_at
-  }
-
-  // Busca notas com o token que funciona
+  // Usa o _id da v1 para buscar na v2
   const chunks = [];
-  for (let i = 0; i < deals.length; i += 5)
-    chunks.push(deals.slice(i, i + 5));
+  for (let i = 0; i < deals.length; i += 10)
+    chunks.push(deals.slice(i, i + 10));
+
   for (const chunk of chunks) {
     await Promise.all(chunk.map(async d => {
       const id = d._id;
       if (!id) return;
-      const url = `https://api.rd.services/api/v2/deals/${id}/notes?page[size]=5&sort[registered_at]=desc&token=${workingToken}`;
+      const url = `https://api.rd.services/crm/v2/deals/${id}/notes?page[size]=50&token=${CRM_TOKEN}`;
       const res = await get(url);
       results[id] = res?.data || [];
     }));
   }
-  console.log(`Deals com notas: ${Object.values(results).filter(n=>n.length>0).length}/${deals.length}`);
   return results;
 }
 
@@ -142,6 +121,7 @@ function mapOrigin(name) {
   return 'Outros';
 }
 
+// API v1 campos: deal_stage._id, amount_total, win (true/false/null), user._id, deal_source._id
 const stageId = d => d.deal_stage?._id || null;
 const val     = d => parseFloat(d.amount_total || d.amount_montly || 0);
 const isWon   = d => d.win === true;
@@ -159,27 +139,16 @@ async function buildData(p) {
     console.log(`Deal[0]: stage=${stageId(d)} ord=${sOrd(d)} val=${val(d)} win=${d.win}`);
   }
 
-  // Buscar notas — testa os 3 tokens automaticamente
+  // Buscar notas para interações
   const notesMap = await fetchNotesForDeals(deals);
   const today2  = new Date().toISOString().slice(0, 10);
   const mesIni2 = today2.slice(0, 8) + '01';
   let interacoesMes = 0, interacoesHoje = 0;
-
-  if (notesMap) {
-    // Usa notas
-    for (const notes of Object.values(notesMap)) {
-      if (!notes.length) continue;
-      const lastDate = (notes[0].registered_at || '').slice(0, 10);
-      if (lastDate >= mesIni2) interacoesMes++;
-      if (lastDate === today2) interacoesHoje++;
-    }
-  } else {
-    // Fallback: updated_at
-    for (const d of deals) {
-      const updated = (d.updated_at || '').slice(0, 10);
-      if (updated >= mesIni2) interacoesMes++;
-      if (updated === today2) interacoesHoje++;
-    }
+  for (const notes of Object.values(notesMap)) {
+    if (!notes.length) continue;
+    const lastDate = (notes[0].registered_at || notes[0].created_at || '').slice(0, 10);
+    if (lastDate >= mesIni2) interacoesMes++;
+    if (lastDate === today2) interacoesHoje++;
   }
   console.log(`Interações hoje: ${interacoesHoje} | mês: ${interacoesMes}`);
 
@@ -206,6 +175,7 @@ async function buildData(p) {
   const valNegoc = sum(open.filter(d => sOrd(d) >= POS_NEGOC));
   const valPipe  = sum(open);
 
+  // Funil snapshot real
   const funnel = STAGES.map(s => {
     const arr = f.filter(d => stageId(d) === s.id);
     return { stage: s.name, count: arr.length, value: Math.round(sum(arr)*100)/100 };
@@ -250,7 +220,9 @@ async function buildData(p) {
   const mesIni = today.slice(0,8)+'01';
   const allDealsHoje = f.filter(d => (d.created_at||'').slice(0,10) === today);
   const allDealsMes  = f.filter(d => (d.created_at||'').slice(0,10) >= mesIni);
-  const [mktFunnel] = await Promise.all([mkt('/platform/analytics/conversion_funnel')]);
+  const [mktFunnel] = await Promise.all([
+    mkt('/platform/analytics/conversion_funnel'),
+  ]);
 
   const receita = sum(won), qtdWon = won.length;
 

@@ -88,16 +88,22 @@ async function getSources() {
 async function fetchNotesForDeals(deals) {
   const results = {};
   const chunks = [];
-  for (let i = 0; i < deals.length; i += 10)
-    chunks.push(deals.slice(i, i + 10));
+  for (let i = 0; i < deals.length; i += 5)
+    chunks.push(deals.slice(i, i + 5));
   for (const chunk of chunks) {
     await Promise.all(chunk.map(async d => {
       const id = d.id || d._id;
       if (!id) return;
-      const res = await get(`https://api.rd.services/api/v2/deals/${id}/notes?page[size]=5&token=${CRM_TOKEN}`);
-      results[id] = res?.data || [];
+      const url = `https://api.rd.services/api/v2/deals/${id}/notes?page[size]=5&token=${CRM_TOKEN}`;
+      const res = await get(url);
+      const notes = res?.data || [];
+      if (notes.length > 0) {
+        console.log(`Nota encontrada: deal=${id} date=${notes[0].registered_at}`);
+      }
+      results[id] = notes;
     }));
   }
+  console.log(`Total deals com notas: ${Object.values(results).filter(n => n.length > 0).length}`);
   return results;
 }
 

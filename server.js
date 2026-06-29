@@ -1,9 +1,14 @@
 const http  = require('http');
 const https = require('https');
+const fs    = require('fs');
 
-const CRM_TOKEN   = '6a3be3a4c81c68001e67ea0a';
-const MKT_TOKEN   = '745467e98d2287fcdd41eb572722b0c9';
-const PIPELINE_ID = '6a3c2697d2d223001fa3f0ad';
+const CRM_TOKEN    = '6a3be3a4c81c68001e67ea0a';
+const MKT_TOKEN    = '745467e98d2287fcdd41eb572722b0c9';
+const PIPELINE_ID  = '6a3c2697d2d223001fa3f0ad';
+const CLIENT_ID    = '68f5d893-7f2d-4b61-a264-9d9defd408ec';
+const CLIENT_SECRET= '4be61bcbcc6a49cf9ef14ccd5f7f2a66';
+const CALLBACK_URL = 'https://esc-dashboard-api.onrender.com/callback';
+const TOKEN_FILE   = '/tmp/oauth_tokens.json';
 const PORT = process.env.PORT || 3000;
 
 const STAGES = [
@@ -23,13 +28,26 @@ STAGES.forEach(s => {
   STAGES_SIMPLE[s.id] = s.name;
 });
 
-const SID_GANHO   = '6a3c2dff80f293001ef244bc';
-const SID_PERDIDO = '6a3c2e038c080c001f52f8e6';
 const POS_AGEND = 3, POS_REUN = 4, POS_NEGOC = 5;
 
-function get(url) {
+// ── OAuth tokens em memória ──────────────────────────────────
+let oauthTokens = null;
+try {
+  if (fs.existsSync(TOKEN_FILE)) {
+    oauthTokens = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
+    console.log('OAuth tokens carregados do arquivo');
+  }
+} catch(e) { console.log('Sem tokens OAuth salvos'); }
+
+function saveTokens(tokens) {
+  oauthTokens = tokens;
+  try { fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokens)); } catch(e) {}
+}
+
+// ── HTTP helpers ─────────────────────────────────────────────
+function get(url, headers = {}) {
   return new Promise(resolve => {
-    const req = https.get(url, { headers: { Accept: 'application/json' } }, res => {
+    const req = https.get(url, { headers: { Accept: 'application/json', ...headers } }, res => {
       let d = '';
       res.on('data', c => d += c);
       res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
@@ -39,7 +57,77 @@ function get(url) {
   });
 }
 
-// API v1 — funciona com token como query param
+function post(url, body, headers = {}) {
+  return new Promise(resolve => {
+    const data = typeof body === 'string' ? body : JSON.stringify(body);
+    const urlObj = new URL(url);
+    const options = {
+      hostname: urlObj.hostname,
+      path: urlObj.pathname + urlObj.search,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), ...headers }
+    };
+    const req = https.request(options, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
+    });
+    req.on('error', () => resolve(null));
+    req.write(data);
+    req.end();
+  });
+}
+
+// ── OAuth ────────────────────────────────────────────────────
+async function refreshAccessToken() {
+  if (!oauthTokens?.refresh_token) return null;
+  const res = await post('https://api.rd.services/auth/token', {
+    client_id:     CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+    refresh_token: oauthTokens.refresh_token,
+    grant_type:    'refresh_token'
+  });
+  if (res?.access_token) {
+    saveTokens({ ...oauthTokens, ...res });
+    console.log('Access token renovado com sucesso');
+    return res.access_token;
+  }
+  console.log('Erro ao renovar access token:', JSON.stringify(res));
+  return null;
+}
+
+async function getAccessToken() {
+  if (!oauthTokens) return null;
+  // Renovar se expirado ou próximo de expirar
+  const expiry = oauthTokens.expires_at || 0;
+  if (Date.now() > expiry - 60000) {
+    return await refreshAccessToken();
+  }
+  return oauthTokens.access_token;
+}
+
+async function exchangeCode(code) {
+  const res = await post('https://api.rd.services/auth/token', {
+    client_id:     CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+    redirect_uri:  CALLBACK_URL,
+    code,
+    grant_type: 'authorization_code'
+  });
+  if (res?.access_token) {
+    saveTokens({
+      access_token:  res.access_token,
+      refresh_token: res.refresh_token,
+      expires_at:    Date.now() + (res.expires_in || 3600) * 1000
+    });
+    console.log('OAuth autorizado com sucesso!');
+    return true;
+  }
+  console.log('Erro ao trocar código:', JSON.stringify(res));
+  return false;
+}
+
+// ── API helpers ──────────────────────────────────────────────
 function v1(path, params = {}) {
   let url = `https://crm.rdstation.com/api/v1${path}?token=${CRM_TOKEN}`;
   Object.entries(params).forEach(([k, v]) => url += `&${k}=${encodeURIComponent(v)}`);
@@ -51,7 +139,13 @@ function mkt(path) {
   return get(`https://api.rd.services${path}${sep}token=${MKT_TOKEN}`);
 }
 
-// API v1: deal_pipeline_id, retorna deals[]
+async function getWithOAuth(url) {
+  const token = await getAccessToken();
+  if (!token) return null;
+  return get(url, { Authorization: `Bearer ${token}` });
+}
+
+// ── Deals ────────────────────────────────────────────────────
 async function allDeals() {
   const all = [];
   let page = 1;
@@ -86,23 +180,32 @@ async function getSources() {
   return m;
 }
 
-// Busca notas via API v2 (único endpoint que funciona para notas)
+// ── Notas via OAuth ──────────────────────────────────────────
 async function fetchNotesForDeals(deals) {
+  const token = await getAccessToken();
+  if (!token) {
+    console.log('Sem OAuth — usando updated_at como fallback');
+    return null;
+  }
+
   const results = {};
-  // Usa o _id da v1 para buscar na v2
   const chunks = [];
-  for (let i = 0; i < deals.length; i += 10)
-    chunks.push(deals.slice(i, i + 10));
+  for (let i = 0; i < deals.length; i += 5)
+    chunks.push(deals.slice(i, i + 5));
 
   for (const chunk of chunks) {
     await Promise.all(chunk.map(async d => {
       const id = d._id;
       if (!id) return;
-      const url = `https://api.rd.services/crm/v2/deals/${id}/notes?page[size]=50&token=${CRM_TOKEN}`;
-      const res = await get(url);
-      results[id] = res?.data || [];
+      const url = `https://api.rd.services/api/v2/deals/${id}/notes?page[size]=5&sort[registered_at]=desc`;
+      const res = await get(url, { Authorization: `Bearer ${token}` });
+      const notes = res?.data || [];
+      if (notes.length > 0) console.log(`Nota: deal=${id.slice(-6)} date=${(notes[0].registered_at||'').slice(0,10)}`);
+      results[id] = notes;
     }));
   }
+  const comNotas = Object.values(results).filter(n=>n.length>0).length;
+  console.log(`Deals com notas: ${comNotas}/${deals.length}`);
   return results;
 }
 
@@ -121,7 +224,6 @@ function mapOrigin(name) {
   return 'Outros';
 }
 
-// API v1 campos: deal_stage._id, amount_total, win (true/false/null), user._id, deal_source._id
 const stageId = d => d.deal_stage?._id || null;
 const val     = d => parseFloat(d.amount_total || d.amount_montly || 0);
 const isWon   = d => d.win === true;
@@ -139,16 +241,25 @@ async function buildData(p) {
     console.log(`Deal[0]: stage=${stageId(d)} ord=${sOrd(d)} val=${val(d)} win=${d.win}`);
   }
 
-  // Buscar notas para interações
+  // Notas via OAuth (ou fallback updated_at)
   const notesMap = await fetchNotesForDeals(deals);
   const today2  = new Date().toISOString().slice(0, 10);
   const mesIni2 = today2.slice(0, 8) + '01';
   let interacoesMes = 0, interacoesHoje = 0;
-  for (const notes of Object.values(notesMap)) {
-    if (!notes.length) continue;
-    const lastDate = (notes[0].registered_at || notes[0].created_at || '').slice(0, 10);
-    if (lastDate >= mesIni2) interacoesMes++;
-    if (lastDate === today2) interacoesHoje++;
+
+  if (notesMap) {
+    for (const notes of Object.values(notesMap)) {
+      if (!notes.length) continue;
+      const lastDate = (notes[0].registered_at || '').slice(0, 10);
+      if (lastDate >= mesIni2) interacoesMes++;
+      if (lastDate === today2) interacoesHoje++;
+    }
+  } else {
+    for (const d of deals) {
+      const updated = (d.updated_at || '').slice(0, 10);
+      if (updated >= mesIni2) interacoesMes++;
+      if (updated === today2) interacoesHoje++;
+    }
   }
   console.log(`Interações hoje: ${interacoesHoje} | mês: ${interacoesMes}`);
 
@@ -167,7 +278,6 @@ async function buildData(p) {
   const won  = f.filter(isWon);
   const lost = f.filter(isLost);
   const open = f.filter(isOpen);
-  console.log(`won:${won.length} lost:${lost.length} open:${open.length}`);
 
   const cntAgend = open.filter(d => sOrd(d) >= POS_AGEND).length;
   const cntReun  = open.filter(d => sOrd(d) >= POS_REUN).length;
@@ -175,7 +285,6 @@ async function buildData(p) {
   const valNegoc = sum(open.filter(d => sOrd(d) >= POS_NEGOC));
   const valPipe  = sum(open);
 
-  // Funil snapshot real
   const funnel = STAGES.map(s => {
     const arr = f.filter(d => stageId(d) === s.id);
     return { stage: s.name, count: arr.length, value: Math.round(sum(arr)*100)/100 };
@@ -220,23 +329,18 @@ async function buildData(p) {
   const mesIni = today.slice(0,8)+'01';
   const allDealsHoje = f.filter(d => (d.created_at||'').slice(0,10) === today);
   const allDealsMes  = f.filter(d => (d.created_at||'').slice(0,10) >= mesIni);
-  const [mktFunnel] = await Promise.all([
-    mkt('/platform/analytics/conversion_funnel'),
-  ]);
+  const [mktFunnel] = await Promise.all([mkt('/platform/analytics/conversion_funnel')]);
 
   const receita = sum(won), qtdWon = won.length;
 
   return {
-    meta: { pipeline_id: PIPELINE_ID, total_deals: f.length, stages: STAGES_SIMPLE, users, gerado_em: new Date().toISOString() },
+    meta: { pipeline_id: PIPELINE_ID, total_deals: f.length, stages: STAGES_SIMPLE, users, gerado_em: new Date().toISOString(), oauth_ativo: !!oauthTokens },
     captacao: {
-      leads_whatsapp: byOrigin['WhatsApp']?.leads   || 0,
-      leads_rd:       byOrigin['RD Station']?.leads || 0,
-      leads_site:     byOrigin['Site']?.leads       || 0,
-      leads_total: f.length,
-      leads_hoje:  allDealsHoje.length,
-      leads_mes:   allDealsMes.length,
-      interacoes_mes:  interacoesMes,
-      interacoes_hoje: interacoesHoje,
+      leads_total: f.length, leads_hoje: allDealsHoje.length, leads_mes: allDealsMes.length,
+      interacoes_mes: interacoesMes, interacoes_hoje: interacoesHoje,
+      leads_whatsapp: byOrigin['WhatsApp']?.leads || 0,
+      leads_rd: byOrigin['RD Station']?.leads || 0,
+      leads_site: byOrigin['Site']?.leads || 0,
     },
     comercial: {
       agendamentos: cntAgend, reunioes_ocorridas: cntReun,
@@ -245,10 +349,10 @@ async function buildData(p) {
       won: qtdWon, lost: lost.length, open: open.length,
     },
     conversao: {
-      presenca_reuniao:      pct(cntReun,  cntAgend),
-      reuniao_para_venda:    pct(qtdWon,   cntReun),
-      negociacao_para_venda: pct(qtdWon,   cntNegoc),
-      lead_para_venda:       pct(qtdWon,   f.length),
+      presenca_reuniao: pct(cntReun, cntAgend),
+      reuniao_para_venda: pct(qtdWon, cntReun),
+      negociacao_para_venda: pct(qtdWon, cntNegoc),
+      lead_para_venda: pct(qtdWon, f.length),
     },
     financeiro: {
       receita_fechada: Math.round(receita*100)/100,
@@ -261,20 +365,50 @@ async function buildData(p) {
       melhor_canal_leads: cl, melhor_canal_vendas: cv, melhor_canal_receita: cr,
       melhor_vendedor: bestV, melhor_vendedor_conv: bestC,
       etapa_maior_perda: Object.keys(perda).sort((a,b)=>perda[b]-perda[a])[0]||null,
-      perda_por_etapa: perda,
     },
     filtros_disponiveis: { users, stages: STAGES_SIMPLE,
       origens: ['WhatsApp','Site','RD Station','Instagram','Indicação','Evento','Outros'] },
   };
 }
 
+// ── Servidor HTTP ────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+
   if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
-  const url = new URL(req.url, 'http://localhost');
+
+  const url = new URL(req.url, `http://localhost`);
+
+  // Rota de callback OAuth
+  if (url.pathname === '/callback') {
+    const code = url.searchParams.get('code');
+    if (code) {
+      const ok = await exchangeCode(code);
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.writeHead(200);
+      res.end(ok
+        ? '<h2>✅ OAuth autorizado com sucesso! Pode fechar esta janela.</h2>'
+        : '<h2>❌ Erro ao autorizar. Tente novamente.</h2>'
+      );
+    } else {
+      res.writeHead(400);
+      res.end('Código não encontrado');
+    }
+    return;
+  }
+
+  // Rota de status OAuth
+  if (url.pathname === '/oauth-status') {
+    res.setHeader('Content-Type', 'application/json');
+    res.writeHead(200);
+    res.end(JSON.stringify({ oauth_ativo: !!oauthTokens, expires_at: oauthTokens?.expires_at }));
+    return;
+  }
+
+  // Rota principal
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
   try {
     const data = await buildData(Object.fromEntries(url.searchParams));
     res.writeHead(200);
@@ -286,4 +420,12 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => console.log(`ESC Dashboard API na porta ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`ESC Dashboard API na porta ${PORT}`);
+  if (!oauthTokens) {
+    const authUrl = `https://api.rd.services/auth/dialog?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(CALLBACK_URL)}&response_type=code`;
+    console.log(`\n⚠️  OAuth não configurado! Acesse para autorizar:\n${authUrl}\n`);
+  } else {
+    console.log('✅ OAuth ativo — notas serão buscadas via API');
+  }
+});

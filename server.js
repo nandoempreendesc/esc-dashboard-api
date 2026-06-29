@@ -180,6 +180,23 @@ async function getSources() {
   return m;
 }
 
+// ── Busca IDs v2 para os deals da v1 ────────────────────────
+async function getDealIdsV2(token) {
+  // Busca todos os deals via API v2 para obter os IDs corretos
+  const idMap = {}; // name => id_v2
+  let page = 1;
+  while (page <= 10) {
+    const url = `https://api.rd.services/api/v2/deals?filter=pipeline_id:${PIPELINE_ID}&page[number]=${page}&page[size]=50`;
+    const res = await get(url, { Authorization: `Bearer ${token}` });
+    const data = res?.data || [];
+    data.forEach(d => { idMap[d.name] = d.id; });
+    if (data.length < 50) break;
+    page++;
+  }
+  console.log(`IDs v2 mapeados: ${Object.keys(idMap).length}`);
+  return idMap;
+}
+
 // ── Notas via OAuth ──────────────────────────────────────────
 async function fetchNotesForDeals(deals) {
   const token = await getAccessToken();
@@ -188,6 +205,9 @@ async function fetchNotesForDeals(deals) {
     return null;
   }
 
+  // Mapear IDs v2 pelos nomes dos deals
+  const idMapV2 = await getDealIdsV2(token);
+
   const results = {};
   const chunks = [];
   for (let i = 0; i < deals.length; i += 5)
@@ -195,13 +215,14 @@ async function fetchNotesForDeals(deals) {
 
   for (const chunk of chunks) {
     await Promise.all(chunk.map(async d => {
-      const id = d._id;
+      // Usa ID v2 pelo nome do deal
+      const id = idMapV2[d.name] || d._id;
       if (!id) return;
       const url = `https://api.rd.services/api/v2/deals/${id}/notes?page[size]=5&sort[registered_at]=desc`;
       const res = await get(url, { Authorization: `Bearer ${token}` });
       const notes = res?.data || [];
-      if (notes.length > 0) console.log(`Nota: deal=${id.slice(-6)} date=${(notes[0].registered_at||'').slice(0,10)}`);
-      results[id] = notes;
+      if (notes.length > 0) console.log(`Nota: deal=${d.name?.slice(0,20)} date=${(notes[0].registered_at||'').slice(0,10)}`);
+      results[d._id || id] = notes;
     }));
   }
   const comNotas = Object.values(results).filter(n=>n.length>0).length;
